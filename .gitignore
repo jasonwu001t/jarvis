@@ -21,6 +21,5 @@ github-sync/config.json
 github-sync/secret-scan-allow.txt
 
 # Skill runtime output / scratch data (regenerated on run)
-wsj-news/wsj_articles.json
 **/output/
 **/*.log
