@@ -77,6 +77,7 @@ price, yield, flows and the multiple. Note the choice in the playbook.
 | `scripts/report_html.py` | The HTML report renderer (loads the ticker folder's `narrative.py` when present). |
 | `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter. |
 | `scripts/new_ticker.py` | Scaffold a ticker folder with a commented `inputs.json`. |
+| `scripts/backtest.py` | Point-in-time backtest: rebuild the model at each earnings release + lag days, apply the rules, compare with buy-and-hold and SPY (see `references/monitoring.md`). |
 | `references/valuation-method.md` | The method in English. |
 | `references/data-sources.md` | marketlens / atlas tool map: what is live, what is manual, how to fetch each. |
 | `references/inputs-schema.md` | Every key in `inputs.json`. |

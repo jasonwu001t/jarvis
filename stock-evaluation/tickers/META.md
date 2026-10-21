@@ -54,6 +54,17 @@ House position +5% from base toward bull; 50% DCF / 50% P/E; 12-year convergence
 3. Operating margin (model 31% Q3E, 34% Q4E) and Family of Apps margin (39% / 43%).
 4. After the print: `monitor.py --dir … --apply-actuals`, key in segments, refresh consensus.
 
+## Backtest (2026-10-21, `research/META/backtest/`)
+
+Decision at each earnings release + 2 trading days, Oct 2023 → Oct 2026, today's assumptions and
+rules, mechanical street (no historical consensus available): momentum street 2.12x vs buy-and-hold
+2.34x vs SPY 1.87x; foresight street 2.63x. 12-month price landed inside the bear–bull band 6 of 8
+times (momentum) and 8 of 8 (foresight). The momentum street under-forecast the late-2023 inflection
+(TTM growth 7%, margin 29%) so the rules trimmed to 50% just before the 2024 run; with accurate
+forecasts the same rules beat buy-and-hold. Lesson: the method's edge is the consensus block and the
+thesis uplift, not the mechanics; keep the consensus fresh and lean on the foresight gap as the
+measure of forecast quality.
+
 ## Log
 
 - 2026-10-20: built; live run at $694 gave bear 598 / base 808 / bull 881 / house 812 (+16.9%), rule

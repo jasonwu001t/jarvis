@@ -18,9 +18,31 @@ quarter is flagged, (4) whether any check fails. A failing check is an input pro
 
 `inputs.json → monitor.rules`: name, `when` (a Python expression over `price`, `house_target`,
 `house_upside`, `bear_target`, `base_target`, `bull_target`, `price_implied_pe_base`, `pe5y_low`,
-`pe5y_high`) and `action` (what the user decided in advance). The META set: below bear case; add
-zone (≥ 20% upside); hold zone (5-20%); at target (< 5%); multiple above own 5-year high. Rules are
-the user's position discipline: evaluate, report, do not decide.
+`pe5y_high`), `exposure` (target position as a fraction of full size; `null` = keep / informational)
+and `action` (what the user decided in advance). Rules are evaluated in order and the first that fires
+with an exposure sets the position. The META set: below bear case → 100% (price under the no-premium
+value is maximum margin of safety, not a sell); add zone (≥ 20% upside) → 100%; hold zone (5-20%) →
+keep; at target (−10% to 5%) → 50%; stretched (price > 10% above the house target) → 25%; multiple
+above own 5-year high → informational. Rules are the user's position discipline: evaluate, report,
+do not decide.
+
+## Backtest
+
+```bash
+python3 ~/.claude/skills/stock-evaluation/scripts/backtest.py --dir ~/AlphaResearch/research/<TICKER> --since 2023-10-01 --lag 2
+```
+
+Point in time: for every earnings release in the window (8-K item 2.02 from `sec.earnings_releases`)
+the model is rebuilt as of the release plus `--lag` trading days (XBRL actuals known by then, DGS10 and
+a 2-year weekly beta on that day, the close that day), the first rule that fires sets the position at
+that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
+at zero). Because historical sell-side consensus is not available, the forecast block is a mechanical
+street in two variants: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and
+tax, capex on its own TTM growth) and **foresight** (reported figures where the forecast periods have
+since been reported, an upper bound). Scenario assumptions, adjustments and rules are the folder's
+current ones; segment adjustments become total-revenue adjustments. Outputs `backtest/results.json`,
+`report.md`, `report.html` (equity curves, targets against the price path, quarter table, honesty notes).
+Use it to test the rules and the method, not to claim the analyst's historical track record.
 
 ## After an earnings print
 

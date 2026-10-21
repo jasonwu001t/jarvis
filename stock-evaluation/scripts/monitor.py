@@ -252,7 +252,7 @@ def rules(inputs: dict, out: dict) -> list[dict]:
             fired = bool(eval(r["when"], {"__builtins__": {}}, ctx))  # noqa: S307 - expressions come from the user's own inputs.json
         except Exception as exc:  # noqa: BLE001
             fired, r = False, {**r, "action": f"rule error: {exc}"}
-        res.append({"name": r["name"], "fired": fired, "action": r["action"], "when": r["when"]})
+        res.append({"name": r["name"], "fired": fired, "action": r["action"], "when": r["when"], "exposure": r.get("exposure")})
     return res
 
 
@@ -284,7 +284,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     L.append("## Rules")
     L.append("")
     for r in rules(inputs, out):
-        L.append(f"- {'🔴' if r['fired'] else '⚪'} **{r['name']}** — {r['action']}  `{r['when']}`")
+        L.append(f"- {'🔴' if r['fired'] else '⚪'} **{r['name']}**" + (f" (position {r['exposure']:.0%})" if r.get('exposure') is not None else "") + f" — {r['action']}  `{r['when']}`")
     L.append("")
     L.append("## Live inputs")
     L.append("")
