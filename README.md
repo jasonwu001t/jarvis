@@ -1,8 +1,9 @@
-# skills
+# jarvis
 
-Central store of my personal [Agent Skills](https://github.com/anthropics/skills),
-shared by **Claude Code** and **Kiro CLI**, version-controlled and synced to
-[github.com/jasonwu001t/skills](https://github.com/jasonwu001t/skills).
+My personal-assistant toolkit: a central store of [Agent Skills](https://github.com/anthropics/skills)
+that help with day-to-day life — travel searches, backups, and more.
+Shared by **Claude Code** and **Kiro CLI**, version-controlled and synced to
+[github.com/jasonwu001t/jarvis](https://github.com/jasonwu001t/jarvis).
 
 ## How it's wired
 
@@ -27,13 +28,14 @@ Flat: every top-level folder containing a `SKILL.md` is a skill.
 ├── README.md
 ├── TEMPLATE.md            # starter for new skills (not a skill itself)
 ├── .gitignore
-├── va-reward-search/
-│   ├── SKILL.md
-│   └── scripts/
-└── wsj-news/
-    ├── SKILL.md
-    ├── README.md
-    └── process_articles.py
+├── github-sync/
+├── legal-comms-check/
+├── mcp-builder/
+├── skill-creator/
+├── stock-evaluation/      # evaluate / monitor a ticker: 3-scenario DCF + multiple, HTML report, daily monitor
+├── systems-explainer/
+├── travel-planning/
+└── va-reward-search/
 ```
 
 > Note: skills are kept at the top level (not nested under a `skills/`
@@ -55,11 +57,9 @@ step.
 ## Sync to GitHub
 
 Skills are live as soon as the files exist locally. Backing them up / sharing
-is a normal Git push:
+is a normal Git push — the [`github-sync`](github-sync/) skill in this repo
+handles it (add → commit → push, with a pre-push secret scan):
 
 ```bash
-cd ~/.claude/skills
-git add -A
-git commit -m "Update skills"
-git push
+~/.claude/skills/github-sync/scripts/sync.sh "Update skills"
 ```

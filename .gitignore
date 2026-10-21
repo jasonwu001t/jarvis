@@ -23,3 +23,6 @@ github-sync/secret-scan-allow.txt
 # Skill runtime output / scratch data (regenerated on run)
 **/output/
 **/*.log
+
+# Anthropic-synced skills (tool-installed under synced/, not authored here)
+synced/
