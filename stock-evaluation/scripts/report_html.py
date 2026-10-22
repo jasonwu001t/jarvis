@@ -238,6 +238,64 @@ def sens_html(sn: dict, out: dict) -> str:
             f"<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>{r}")
 
 
+# ------------------------------------------------------------------------------------ position block
+def position_section(inputs: dict, out: dict, live: dict) -> str:
+    ex, im, rt = out.get("expected") or {}, out.get("implied") or {}, out.get("returns") or {}
+    P = live.get("position") or {}
+    st, rs = P.get("state"), P.get("result")
+    S = inputs["scenarios"]
+    bm = out["scenarios"]["base"]["multiples"]
+    rows = []
+    if ex:
+        rows += [("Probability-weighted target (p bear/base/bull %s/%s/%s)" % tuple(pc(ex["probabilities"][k], 0) for k in ("bear", "base", "bull")), f"{usd(ex['expected_target'])} ({pc(ex['expected_upside'], 1, True)})"),
+                 ("Downside to the bear value", pc(ex["downside_to_bear"], 1, True)),
+                 (f"Reward to risk (full position at {ex['full_at_reward_to_risk']:.1f})", f"{ex['reward_to_risk']:.2f}" if ex["reward_to_risk"] != float("inf") else "∞ (price below bear value)"),
+                 ("<b>Expected-value exposure</b>", f"<b>{pc(ex['exposure'], 0)}</b>")]
+    if P:
+        rows.append(("Rules exposure (first fired rule)", pc(P["rule_exposure"], 0) if P.get("rule_exposure") is not None else "keep"))
+    if st and rs:
+        rows += [("Regime gate: NFCI / VIX / Baa spread", f"{st['nfci']:+.2f} / {st['vix']:.1f} / {pc(st['baa10y'], 2)}" + (f" → <b>stress</b> ({'; '.join(st['stress'])}), cap {pc(st['regime_cap'], 0)}" if st["stress"] else " → no stress")),
+                 ("Volatility scaling: realised 60-day vol → multiplier", f"{pc(st['realized_vol'], 0)} → {st['vol_scale']:.2f}"),
+                 ("Trend: price vs 200-day average", f"{'above' if st['above_sma'] else 'below'} ({usd(st['sma'], 0)})" + ("; increases staged" if rs["staged"] else "")),
+                 (f"<b>Recommended exposure</b> (signal {pc(rs['signal'], 0)} → regime {pc(rs['after_regime'], 0)} → vol {pc(rs['after_vol'], 0)}; current {pc(P['current'], 0) if P.get('current') is not None else 'unknown'})", f"<b>{pc(rs['recommended'], 0)}</b>")]
+    pos_tbl = "<div class='tbl'><table><tbody>" + "".join(f"<tr><td>{a}</td><td class='num'>{b}</td></tr>" for a, b in rows) + "</tbody></table></div>"
+    imp = []
+    if im.get("growth_pp") is not None:
+        imp.append(f"<li><b>{im['growth_pp'] * 100:+.1f}pp</b> on consensus growth in every forecast period (house adjustments kept)</li>")
+    if im.get("steady_margin") is not None:
+        imp.append(f"<li>or a steady-state operating margin of <b>{pc(im['steady_margin'])}</b> (model {pc(S['base']['steady_margin'], 0)})</li>")
+    if im.get("steady_roic") is not None:
+        imp.append(f"<li>or a steady-state ROIC of <b>{pc(im['steady_roic'])}</b> (model {pc(S['base']['steady_roic'], 0)})</li>")
+    roic = ""
+    if rt.get("incremental_roic") is not None:
+        roic = (f"<p>Realised 2-year incremental ROIC <b>{pc(rt['incremental_roic'])}</b>: ΔNOPAT {m(rt['nopat_ttm'] - rt['nopat_ttm_prior'])} on {m(rt['net_reinvestment'])} of net reinvestment"
+                + (f"; the base steady-state ROIC is anchored from {pc(rt['anchor']['template_base'], 0)} to {pc(rt['anchor']['anchored_base'])}" if rt.get("anchor") else "") + ".</p>")
+    mult = ""
+    if abs(bm.get("target_multiple", 0) - bm.get("stated_multiple", 0)) > 1e-9:
+        mult = f"<p>Rate-aware multiple: the base {bm['stated_multiple']:.0f}x was set at a 5% ten-year; at {pc(inputs['wacc']['risk_free'], 2)} it is applied as {bm['target_multiple']:.1f}x.</p>"
+    g = live.get("guidance") or {}
+    guid = ""
+    if g.get("parsed"):
+        gr = []
+        rv, cx, ep = g.get("revenue_next_quarter"), g.get("capex_full_year"), g.get("expenses_full_year")
+        if rv:
+            cons = inputs["lines"]["revenue"].get(str(rv["period_key"]))
+            gr.append(f"<tr><td>Revenue FY{rv['period_key'] // 10} Q{rv['period_key'] % 10}</td><td class='num'>{m(rv['low'])}–{m(rv['high'])}</td><td class='num'>{m(rv['mid'])}</td><td class='num'>{m(cons)}</td><td class='num'>{pc(cons / rv['mid'] - 1, 1, True) if cons else '—'}</td></tr>")
+        if cx:
+            cons = inputs["lines"]["capex"].get(str(cx["period_key"]))
+            gr.append(f"<tr><td>Capex FY{cx['period_key'] // 10} (incl. finance leases)</td><td class='num'>{m(cx['low'])}–{m(cx['high'])}</td><td class='num'>{m(cx['mid'])}</td><td class='num'>{m(cons)}</td><td class='num'>{pc(cons / cx['mid'] - 1, 1, True) if cons else '—'}</td></tr>")
+        if ep:
+            gr.append(f"<tr><td>Total expenses FY{ep['period_key'] // 10}</td><td class='num'>{m(ep['low'])}–{m(ep['high'])}</td><td class='num'>{m(ep['mid'])}</td><td></td><td></td></tr>")
+        guid = (f"<h3>Company guidance ({esc(g['date'])} press release) against the model's consensus block</h3><div class='tbl'><table><thead><tr><th>Item (USD m)</th><th>Guided range</th><th>Midpoint</th><th>Model</th><th>Model vs mid</th></tr></thead><tbody>{''.join(gr)}</tbody></table></div>")
+    ins = live.get("insider") or {}
+    ins_html = ""
+    if ins.get("last_3_months"):
+        l3 = ins["last_3_months"]
+        ins_html = f"<p>Insider flow (Forms 4, {esc(', '.join(l3['months']))}): open-market buys ${l3['form4_buy'] / 1e6:,.1f}m, sells ${l3['form4_sell'] / 1e6:,.1f}m; informational.</p>"
+    return (f"<h3>Position: probability-weighted value, reward to risk, and the market-risk overlays</h3>{pos_tbl}"
+            f"<h3>What the price implies (reverse DCF, base scenario)</h3><p>To justify {usd(out['price'], 2)} the base case needs</p><ul>{''.join(imp)}</ul>{roic}{mult}{guid}{ins_html}")
+
+
 # ----------------------------------------------------------------------------------------- charts data
 def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str:
     cols = model.period_meta()
@@ -459,6 +517,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     watch_items.append("<li><b>After the print:</b> run the monitor with <code>--apply-actuals</code>, key in the segment split, refresh the consensus block, rerun.</li>")
     watch = "<ul>" + "".join(watch_items) + "</ul>"
 
+    position_html = position_section(inputs, out, live)
     payload = chart_payload(model, out, tables, inputs)
     nav = [("call", "The call"), ("argument", "The argument"), ("model", "Financial model"), ("valuation", "Valuation"),
            ("sens", "Sensitivities"), ("inputs", "Assumptions"), ("monitor", "Monitor"), ("sources", "Sources")]
@@ -513,6 +572,7 @@ details{{margin:8px 0}} summary{{cursor:pointer;color:var(--text-2)}} footer{{ma
 <div class="tile"><div class="k">Base revenue CAGR FY{fy - 1}–FY{fy + 4}</div><div class="v">{pc(bs['revenue_cagr_5y'], 1)}</div><div class="n">quarters 5-8 op. margin {pc(bs['q5_q8_operating_margin'], 1)}</div></div>
 </div></div>
 <h3>Scenario matrix: what you must believe, and what you get</h3>{matrix}
+{position_html}
 <div class="charts2"><div id="c_tgt_top" class="chart"></div><div id="c_rev" class="chart"></div></div>
 
 <h2 id="argument">{esc(narrative_title)}</h2>

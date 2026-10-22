@@ -26,6 +26,23 @@ keep; at target (−10% to 5%) → 50%; stretched (price > 10% above the house t
 above own 5-year high → informational. Rules are the user's position discipline: evaluate, report,
 do not decide.
 
+## Position: signal, then overlays
+
+The monitor turns the valuation into a position in two steps (`inputs.json → monitor.position_source`,
+`blend.overlays`, `monitor.current_exposure`):
+
+1. **Signal**: the expected-value exposure (reward to risk on the probability-weighted target; see
+   valuation-method.md) or, if `position_source` is `rules`, the first fired rule's exposure.
+2. **Overlays** (`scripts/overlays.py`, official series through atlas): a **regime gate** caps exposure at
+   `cap` when Chicago Fed NFCI, VIX or the Baa spread is past its threshold; **volatility scaling**
+   multiplies by `target / realised 60-day vol` (floored); a **trend filter** stages increases (at most
+   `max_step_below` per decision) while the price is under its 200-day average. The report shows signal →
+   after regime → after vol → recommended, next to the current position.
+
+The reverse DCF, the realised incremental ROIC, the company's latest guidance against the consensus
+block (`scripts/guidance.py`), and insider open-market flow (Forms 4) sit in the same section of the
+report as context for the call.
+
 ## Backtest
 
 ```bash
@@ -37,12 +54,16 @@ the model is rebuilt as of the release plus `--lag` trading days (XBRL actuals k
 a 2-year weekly beta on that day, the close that day), the first rule that fires sets the position at
 that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
 at zero). Because historical sell-side consensus is not available, the forecast block is a mechanical
-street in two variants: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and
-tax, capex on its own TTM growth) and **foresight** (reported figures where the forecast periods have
-since been reported, an upper bound). Scenario assumptions, adjustments and rules are the folder's
-current ones; segment adjustments become total-revenue adjustments. Outputs `backtest/results.json`,
-`report.md`, `report.html` (equity curves, targets against the price path, quarter table, honesty notes).
-Use it to test the rules and the method, not to claim the analyst's historical track record.
+street: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and tax, capex on
+its own TTM growth), **guidance** (the company's own next-quarter revenue range, corrected for its
+historical beat against its midpoint, and full-year capex range from the 8-K exhibit, fading from
+there) and **foresight** (reported figures where the forecast periods have since been reported, an
+upper bound). Variants: momentum/rules, guidance/rules, guidance/EV sizing with the rate-aware multiple
+and ROIC anchor, the same plus overlays, foresight/rules. Scenario assumptions, adjustments and rules
+are the folder's current ones; segment adjustments become total-revenue adjustments. Outputs
+`backtest/results.json`, `report.md`, `report.html` (equity curves with the exposure shading, targets
+against the price path, quarter tables, honesty notes). Use it to test the rules and the method, not to
+claim the analyst's historical track record; one name and one window prove nothing.
 
 ## After an earnings print
 

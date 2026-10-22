@@ -57,13 +57,23 @@ House position +5% from base toward bull; 50% DCF / 50% P/E; 12-year convergence
 ## Backtest (2026-10-21, `research/META/backtest/`)
 
 Decision at each earnings release + 2 trading days, Oct 2023 → Oct 2026, today's assumptions and
-rules, mechanical street (no historical consensus available): momentum street 2.12x vs buy-and-hold
-2.34x vs SPY 1.87x; foresight street 2.63x. 12-month price landed inside the bear–bull band 6 of 8
-times (momentum) and 8 of 8 (foresight). The momentum street under-forecast the late-2023 inflection
-(TTM growth 7%, margin 29%) so the rules trimmed to 50% just before the 2024 run; with accurate
-forecasts the same rules beat buy-and-hold. Lesson: the method's edge is the consensus block and the
-thesis uplift, not the mechanics; keep the consensus fresh and lean on the foresight gap as the
-measure of forecast quality.
+rules. Growth of $1: momentum street / rules 2.12x; guidance street / rules 2.11x; guidance / EV sizing
+with the rate-aware multiple and ROIC anchor 1.87x; all improvements with the overlays 1.75x; foresight
+street 2.63x; buy-and-hold 2.34x; SPY 1.87x. Max drawdown 34% for every variant except guidance/rules
+(30%). Readings:
+
+- Guidance fixed the late-2023 miss (house target 446 instead of 293 at $297) because Meta's own range,
+  beat-adjusted, saw the inflection the trailing numbers could not. Meta guides conservatively: the
+  beat against its midpoint runs ~1.04-1.06; the street uses that factor.
+- Expected-value sizing and the overlays cost return in this window: a one-name bull market with no
+  regime stress, where every reduction from full exposure was a drag and the 35% vol target scaled a
+  46%-vol stock to ~0.75. They are insurance; they pay in a drawdown this window does not contain.
+- Targets were well-calibrated: 12-month price inside the bear–bull band 4-6 of 8 times; house target
+  error 15-16% with the guidance street versus 23% with momentum.
+
+Lesson: the method's edge is the forecast block (consensus and guidance) and the thesis uplift, not the
+mechanics. Keep the consensus fresh; treat the overlays as a risk budget, not a return engine; do not
+tune thresholds on this sample.
 
 ## Log
 

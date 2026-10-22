@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import copy
 import os
 import statistics
 import sys
@@ -29,6 +30,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import valuation_engine as mm  # noqa: E402
 import report_html  # noqa: E402
+import overlays  # noqa: E402
+import guidance as guid  # noqa: E402
 
 
 def _dir(argv):
@@ -163,6 +166,53 @@ def live_earnings(ticker: str) -> dict:
             "status": n.get("status"), "eps_consensus_nasdaq": (n.get("eps_forecast") or {}).get("value")}
 
 
+def live_macro() -> dict:
+    out = {}
+    for sid, name, scale in (("NFCI", "nfci", 1.0), ("VIXCLS", "vix", 1.0), ("BAA10Y", "baa10y", 0.01)):
+        rows = get(f"/api/v1/macro/series/{sid}", limit=400)["data"]["rows"]
+        out[name] = {r["as_of_date"]: float(r["value"]) * scale for r in rows if r["value"] is not None}
+    return out
+
+
+def live_closes(ticker: str, limit: int = 320) -> dict:
+    return {r["as_of_date"]: float(r["close"]) for r in get(f"/api/v1/market/prices/{ticker}", limit=limit)["data"]["rows"]}
+
+
+def live_insider(ticker: str) -> dict:
+    d = get(f"/api/v1/filings/ticker/{ticker}", top_n=5)["data"]["insider"]
+    flow = d.get("monthly_flow", [])[-3:]
+    return {"kpis": d.get("kpis", {}), "last_3_months": {"form4_buy": sum(f.get("form4_buy") or 0 for f in flow), "form4_sell": sum(f.get("form4_sell") or 0 for f in flow),
+                                                          "months": [f["month"] for f in flow]}}
+
+
+def live_guidance(inputs: dict, folder: str) -> dict:
+    """Latest press-release outlook (revenue next quarter, capex and expenses full year), via guidance.py (EDGAR, cached)."""
+    rows = guid.collect(inputs["company"]["ticker"], folder, since=(dt.date.today() - dt.timedelta(days=200)).isoformat())
+    rows = [r for r in rows if r.get("parsed")]
+    return rows[-1] if rows else {}
+
+
+def extend_history(inputs: dict, kpis: dict, back_years: int = 4) -> dict:
+    """Add older reported quarters (from atlas KPIs) to a copy of inputs so the engine can compute realised incremental ROIC."""
+    inp = copy.deepcopy(inputs)
+    L = inp["lines"]
+    fy = inputs["as_of"]["latest_reported_fy"]
+    have = {int(p["key"]) for p in inp["periods"]}
+    keys = sorted({k for k in kpis.get("revenue", {}) if k % 10 != 0 and k // 10 >= fy - back_years and k not in have and k < min(have)})
+    for kpi, line in KPI_TO_LINE.items():
+        if line in ("cash", "total_debt", "gaap_eps"):
+            continue
+        for k in keys:
+            v = kpis.get(kpi, {}).get(k, {}).get("value")
+            if v is not None:
+                L.setdefault(line, {}).setdefault(str(k), v)
+    for k in keys:
+        L.setdefault("wc_increase", {}).setdefault(str(k), 0.0)
+        L.setdefault("finance_lease_additions", {}).setdefault(str(k), 0.0)
+    inp["periods"] = [{"key": k, "year": k // 10, "q": k % 10, "status": "actual"} for k in keys] + inp["periods"]
+    return inp
+
+
 # ------------------------------------------------------------------------------------- new quarters
 def detect_new_quarters(inputs: dict, kpis: dict) -> list[int]:
     latest = inputs["as_of"]["latest_reported_fy"] * 10 + inputs["as_of"]["latest_reported_q"]
@@ -256,6 +306,23 @@ def rules(inputs: dict, out: dict) -> list[dict]:
     return res
 
 
+def position(inputs: dict, out: dict, live: dict) -> dict:
+    """Signal exposure (rules or expected value) through the overlays -> recommended position."""
+    cfg = inputs.get("monitor", {})
+    rl = rules(inputs, out)
+    fired = [r for r in rl if r["fired"] and r.get("exposure") is not None]
+    rule_expo = fired[0]["exposure"] if fired else None
+    ev_expo = out.get("expected", {}).get("exposure")
+    source = cfg.get("position_source", "expected_value")
+    signal = ev_expo if (source == "expected_value" and ev_expo is not None) else rule_expo
+    state = None
+    if isinstance(live.get("closes"), dict) and "error" not in live["closes"] and isinstance(live.get("macro"), dict) and "error" not in live["macro"]:
+        state = overlays.market_state(live["closes"], max(live["closes"]), live["macro"], inputs["blend"].get("overlays"))
+    res = overlays.apply(signal if signal is not None else 1.0, state, cfg.get("current_exposure")) if state else None
+    return {"source": source, "rule_exposure": rule_expo, "ev_exposure": ev_expo, "signal": signal, "state": state, "result": res,
+            "current": cfg.get("current_exposure")}
+
+
 def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, applied_notes: list[str]) -> str:
     a = inputs["as_of"]
     s, h, w = out["scenarios"], out["house"], out["wacc"]
@@ -286,6 +353,55 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     for r in rules(inputs, out):
         L.append(f"- {'🔴' if r['fired'] else '⚪'} **{r['name']}**" + (f" (position {r['exposure']:.0%})" if r.get('exposure') is not None else "") + f" — {r['action']}  `{r['when']}`")
     L.append("")
+    ex, im, rt = out.get("expected", {}), out.get("implied", {}), out.get("returns", {})
+    P = live.get("position") or {}
+    L.append("## Position")
+    L.append("")
+    if ex:
+        L.append(f"- Probability-weighted target {money(ex['expected_target'])} ({pct(ex['expected_upside'])}) with p(bear/base/bull) "
+                 f"{ex['probabilities']['bear']:.0%}/{ex['probabilities']['base']:.0%}/{ex['probabilities']['bull']:.0%}; downside to the bear value {pct(ex['downside_to_bear'])}; "
+                 f"reward/risk {ex['reward_to_risk']:.2f} (full position at {ex['full_at_reward_to_risk']:.1f}) → **expected-value exposure {ex['exposure']:.0%}**")
+    if P:
+        L.append(f"- Rules exposure {('%.0f%%' % (P['rule_exposure'] * 100)) if P.get('rule_exposure') is not None else 'keep'}; position source: {P['source']}; current position {P['current'] if P['current'] is not None else 'unknown'}")
+        st, rs = P.get("state"), P.get("result")
+        if st and rs:
+            L.append(f"- Regime: NFCI {st['nfci']:+.2f} ({st['nfci_date']}), VIX {st['vix']:.1f}, Baa spread {st['baa10y']:.2%}" + (f" → **stress: {', '.join(st['stress'])}**, cap {st['regime_cap']:.0%}" if st['stress'] else " → no stress"))
+            L.append(f"- Volatility: realised {st['realized_vol']:.0%} (60d) vs target → scale {st['vol_scale']:.2f}; trend: price {'above' if st['above_sma'] else 'below'} the 200-day ({money(st['sma'], 2)})" + (" → increases staged" if rs['staged'] else ""))
+            L.append(f"- **Recommended exposure {rs['recommended']:.0%}** (signal {rs['signal']:.0%} → after regime {rs['after_regime']:.0%} → after vol {rs['after_vol']:.0%})")
+    L.append("")
+    L.append("## What the price implies (reverse DCF, base scenario)")
+    L.append("")
+    if im and im.get("growth_pp") is not None:
+        L.append(f"- To justify {money(out['price'], 2)} the base case needs **{im['growth_pp'] * 100:+.1f}pp** on consensus growth in every forecast period (house adjustments kept),")
+    if im and im.get("steady_margin") is not None:
+        L.append(f"- or a steady-state operating margin of **{im['steady_margin']:.1%}** (model {inputs['scenarios']['base']['steady_margin']:.0%}),")
+    if im and im.get("steady_roic") is not None:
+        L.append(f"- or a steady-state ROIC of **{im['steady_roic']:.1%}** (model {inputs['scenarios']['base']['steady_roic']:.0%}).")
+    if rt.get("incremental_roic") is not None:
+        L.append(f"- Realised 2-year incremental ROIC {rt['incremental_roic']:.1%} (ΔNOPAT {money(rt['nopat_ttm'] - rt['nopat_ttm_prior'])} on {money(rt['net_reinvestment'])} net reinvestment)" +
+                 (f"; base steady ROIC anchored {rt['anchor']['template_base']:.0%} → {rt['anchor']['anchored_base']:.1%}" if rt.get("anchor") else ""))
+    g = live.get("guidance") or {}
+    if g.get("parsed"):
+        L.append("")
+        L.append(f"## Company guidance ({g['date']} press release) vs the model")
+        L.append("")
+        rv, cx = g.get("revenue_next_quarter"), g.get("capex_full_year")
+        if rv:
+            mk = str(rv["period_key"]); cons = inputs["lines"]["revenue"].get(mk)
+            L.append(f"- Revenue FY{rv['period_key'] // 10} Q{rv['period_key'] % 10}: guidance {money(rv['low'])}–{money(rv['high'])} (mid {money(rv['mid'])}); model consensus {money(cons)}" + (f" ({pct(cons / rv['mid'] - 1)} vs mid)" if cons else ""))
+        if cx:
+            mk = str(cx["period_key"]); cons = inputs["lines"]["capex"].get(mk)
+            L.append(f"- Capex FY{cx['period_key'] // 10}: guidance {money(cx['low'])}–{money(cx['high'])} (mid {money(cx['mid'])}); model consensus {money(cons)}" + (f" ({pct(cons / cx['mid'] - 1)} vs mid)" if cons else ""))
+        if g.get("expenses_full_year"):
+            e_ = g["expenses_full_year"]; L.append(f"- Total expenses FY{e_['period_key'] // 10}: guidance {money(e_['low'])}–{money(e_['high'])}")
+    ins = live.get("insider") or {}
+    if ins.get("last_3_months"):
+        l3 = ins["last_3_months"]
+        L.append("")
+        L.append(f"## Insider flow (Forms 4, {', '.join(l3['months'])})")
+        L.append("")
+        L.append(f"- Open-market buys ${l3['form4_buy'] / 1e6:,.1f}m, sells ${l3['form4_sell'] / 1e6:,.1f}m; informational (programme sales dominate at large caps).")
+    L.append("")
     L.append("## Live inputs")
     L.append("")
     b = live.get("beta") or {}
@@ -295,6 +411,8 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     L.append(f"- Cost of equity {w['cost_of_equity']:.2%}, after-tax cost of debt {w['after_tax_cost_of_debt']:.2%} (TTM tax {w['ttm_tax_rate']:.1%}), "
              f"E/V {w['weight_equity']:.1%} → WACC **{w['wacc']:.2%}**" + (f" (baseline {base['wacc']:.2%})" if base.get('wacc') is not None else ""))
     bm = s["base"]["multiples"]
+    if abs(bm.get("target_multiple", 0) - bm.get("stated_multiple", 0)) > 1e-9:
+        L.append(f"- Rate-aware multiple: base {bm['stated_multiple']:.0f}x stated → {bm['target_multiple']:.1f}x at a {inputs['wacc']['risk_free']:.2%} ten-year")
     L.append(f"- Price-implied P/E on quarters 5-8 GAAP EPS (${bm['q5_q8_eps']:.2f}): {bm['price_implied_multiple']:.1f}x "
              f"vs target {inputs['scenarios']['base']['target_multiple']:.0f}x; own 5-year forward range {inputs['reference_multiples']['pe5y_low']}x / {inputs['reference_multiples']['pe5y_avg']}x / {inputs['reference_multiples']['pe5y_high']}x")
     L.append(f"- Base case: revenue CAGR FY{a['latest_reported_fy']-1}-FY{a['latest_reported_fy']+4} {s['base']['revenue_cagr_5y']:.1%}, "
@@ -371,8 +489,15 @@ def main(argv: list[str]) -> int:
             live["earnings"] = live_earnings(t)
         except Exception as exc:  # noqa: BLE001
             live["earnings"] = {"error": str(exc)}
+        for name, fn in (("macro", lambda: live_macro()), ("closes", lambda: live_closes(t)), ("insider", lambda: live_insider(t)),
+                         ("guidance", lambda: live_guidance(inputs, HERE))):
+            try:
+                live[name] = fn()
+            except Exception as exc:  # noqa: BLE001
+                live[name] = {"error": str(exc)}
         try:
             kpis = live_kpis(t)
+            live["_kpis"] = kpis
             new_q = detect_new_quarters(inputs, kpis)
             extras = {}
             for key in new_q:
@@ -384,7 +509,9 @@ def main(argv: list[str]) -> int:
                     json.dump(inputs, fh, indent=1, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             live["kpis"] = {"error": str(exc)}
-    out = mm.Model(inputs).run()
+    model_inputs = extend_history(inputs, live["_kpis"]) if isinstance(live.get("_kpis"), dict) else inputs
+    out = mm.Model(model_inputs).run()
+    live["position"] = position(inputs, out, live)
     report = render(inputs, out, live, new_q, avc, notes)
     os.makedirs(os.path.join(HERE, "reports"), exist_ok=True)
     rp = os.path.join(HERE, "reports", f"{dt.date.today().isoformat()}.md")

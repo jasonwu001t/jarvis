@@ -17,6 +17,9 @@ from these sources; the gaps are the vendor-only items below.
 | Beta | `market_bars` 1w P2Y for ticker + SPY, `analytics_beta`; adjusted = 0.67 × raw + 0.33 | `GET /api/v1/market/prices/{ticker}?limit=560` for both, weekly closes |
 | Earnings date and Nasdaq EPS consensus | `research_calendar types=earnings tickers=[X]` | `GET /api/v1/calendar/earnings/ticker/{ticker}` |
 | Filings, 8-K earnings releases, press-release URLs | `research_filings`, `datastore_query sec.earnings_releases` | `sec.earnings_releases` rows (`primary_doc_url`) |
+| Company guidance: next-quarter revenue range, full-year capex and expense ranges | the EX-99.1 exhibit of each earnings 8-K (EDGAR, cached under `source/exhibits/`) | `scripts/guidance.py` (`--dir`, `--since`, `--write`); patterns are issuer-specific, extend them in the playbook |
+| Market regime: Chicago Fed NFCI, VIX close, Baa–10-year spread | `research_macro_series NFCI / VIXCLS / BAA10Y` | `/api/v1/macro/series/{id}` |
+| Insider open-market flow (Forms 4), announced sales (Form 144) | `research_filings` insider fields | `/api/v1/filings/ticker/{ticker}` → `insider.kpis`, `monthly_flow` |
 | Insider activity, 13F / fund holdings | `research_filings` insider fields, `sec.fund_nport*` | — |
 | News (company, official) | `news_search tickers=[X]`, `news_official` | — |
 | Macro context (yields, credit spreads, VIX, dollar, Fed path) | `research_macro_series_list`, `research_calendar types=event` | `/api/v1/macro/*` |

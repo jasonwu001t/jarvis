@@ -21,7 +21,14 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
     "base": {...}, "bull": {...}
   },
   "blend": {"dcf_weight": 0.5, "target_position": 0.05,    // house target: fraction from base toward bull (negative: toward bear)
-            "multiple_type": "P/E", "earnings_basis": "GAAP", "convergence_years": 12},
+            "multiple_type": "P/E", "earnings_basis": "GAAP", "convergence_years": 12,
+            "sizing": {"full_at_reward_to_risk": 2.0, "neutral": 0.5},            // expected-value exposure (valuation-method.md)
+            "multiple_rate_aware": {"enabled": true, "rf_ref": 0.05},             // m x (rf_ref + ERP)/(rf + ERP)
+            "steady_roic_anchor": {"enabled": true, "years": 2, "floor_over_wacc": 0.02},
+            "overlays": {"enabled": true, "regime": {"nfci_max": 0.0, "vix_max": 30, "baa10y_max": 0.025, "cap": 0.5},
+                         "vol": {"target": 0.35, "window": 60, "floor": 0.25}, "trend": {"sma": 200, "max_step_below": 0.25}}},
+  // scenarios also carry "probability" (bear/base/bull, normalised); monitor carries "position_source" (expected_value | rules)
+  // and "current_exposure" (fraction of full size, for trend staging); rules carry "exposure" (fraction, or null = keep / informational)
   "rating": {"label": "Positive"},
   "thesis": {"summary": "one paragraph, shown in the report's House view", "source": "..."},
   "adjustments": [                                          // pp added to consensus growth; line = a segment name,

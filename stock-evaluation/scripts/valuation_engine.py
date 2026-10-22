@@ -13,6 +13,7 @@ Run `python valuation_engine.py research/<TICKER>/inputs.json` for a summary; `-
 from __future__ import annotations
 
 import calendar
+import copy
 import datetime as dt
 import json
 import sys
@@ -29,7 +30,7 @@ def _d(s: str) -> dt.date:
 
 class Model:
     def __init__(self, inputs: dict):
-        self.i = inputs
+        self.i = copy.deepcopy(inputs)   # the engine may anchor steady-state ROIC; never mutate the caller's dict
         self.L = inputs["lines"]
         self.periods = inputs["periods"]
         a = inputs["as_of"]
@@ -291,18 +292,105 @@ class Model:
         sh = w * s["diluted_shares"][self.fy1] + (1 - w) * s["diluted_shares"][self.fy2]
         fx = self.i["market"].get("fx", 1.0) * self.i["market"].get("adr_ratio", 1.0)
         mult = S["target_multiple"]
+        ra = self.i["blend"].get("multiple_rate_aware") or {}
+        if ra.get("enabled"):
+            # a multiple set when the 10-year was rf_ref is re-based to today's required return: m x (rf_ref + ERP) / (rf + ERP)
+            W = self.i["wacc"]
+            mult = mult * (ra.get("rf_ref", 0.05) + W["erp"]) / (W["risk_free"] + W["erp"])
         target = ni * mult / sh * fx
         price = self.i["market"]["price"]
         eps1 = s[ni_line][self.fy1] / s["diluted_shares"][self.fy1] * fx
         eps2 = s[ni_line][self.fy2] / s["diluted_shares"][self.fy2] * fx
-        return {"weight_fy1": w, "q5_q8_net_income": ni, "q5_q8_shares": sh, "q5_q8_eps": ni / sh * fx, "target_multiple": mult,
+        return {"weight_fy1": w, "q5_q8_net_income": ni, "q5_q8_shares": sh, "q5_q8_eps": ni / sh * fx, "target_multiple": mult, "stated_multiple": S["target_multiple"],
                 "target": target, "implied_pe_fy1": target / eps1 if eps1 else None, "implied_pe_fy2": target / eps2 if eps2 else None,
                 "price_implied_multiple": price / fx * sh / ni if ni else None, "eps_fy1": eps1, "eps_fy2": eps2}
 
     # -------------------------------------------------------------- top level
+    # ------------------------------------------------------- returns on capital
+    def incremental_roic(self, years: int = 2) -> dict:
+        """Realised return on the capital added over the last `years`: ΔNOPAT(TTM) / Σ(capex + leases − D&A), reported quarters only."""
+        qs = sorted(int(p["key"]) for p in self.periods if p["q"] != 0 and p["status"] == "actual" and int(p["key"]) <= self.latest_key)
+        n = 4 * years
+        if len(qs) < n + 4:
+            return {"incremental_roic": None, "note": "fewer than %d reported quarters" % (n + 4)}
+        def nopat(k):
+            if self.has("nopat", k):
+                return self.v("nopat", k)
+            pre, tax = self.v("pretax_income", k), self.v("income_tax", k)
+            rate = tax / pre if pre > 0 else self.i["scenarios"]["base"]["steady_tax"]
+            rate = rate if 0 <= rate <= 0.5 else self.i["scenarios"]["base"]["steady_tax"]
+            return self.v("operating_income", k) * (1 - rate)
+        now, then = qs[-4:], qs[-4 - n:-n]
+        d_nopat = sum(nopat(k) for k in now) - sum(nopat(k) for k in then)
+        window = qs[-n:]
+        reinvest = sum(self.v("capex", k) + self.v("finance_lease_additions", k) - self.v("d_and_a", k) + self.v("wc_increase", k) for k in window)
+        return {"incremental_roic": d_nopat / reinvest if reinvest > 0 else None, "nopat_ttm": sum(nopat(k) for k in now),
+                "nopat_ttm_prior": sum(nopat(k) for k in then), "net_reinvestment": reinvest, "years": years,
+                "window": [window[0], window[-1]]}
+
+    def anchor_roic(self, w: dict) -> dict | None:
+        """blend.steady_roic_anchor: pull the base steady-state ROIC down to the realised incremental ROIC when that is lower
+        (floored at WACC + floor_over_wacc), and shift bear and bull by the same amount. Off by default."""
+        cfg = self.i["blend"].get("steady_roic_anchor") or {}
+        if not cfg.get("enabled"):
+            return None
+        r = self.incremental_roic(cfg.get("years", 2))
+        if r.get("incremental_roic") is None:
+            return None
+        base0 = self.i["scenarios"]["base"]["steady_roic"]
+        floor = w["wacc"] + cfg.get("floor_over_wacc", 0.02)
+        anchored = min(base0, max(floor, r["incremental_roic"]))
+        delta = anchored - base0
+        for k in SCENARIOS:
+            self.i["scenarios"][k]["steady_roic"] = max(floor, self.i["scenarios"][k]["steady_roic"] + delta)
+        return {"template_base": base0, "anchored_base": anchored, "delta": delta, "floor": floor, "incremental_roic": r["incremental_roic"]}
+
+    # ------------------------------------------------------------ reverse DCF
+    def _solve(self, lo: float, hi: float, f, target: float, n: int = 40):
+        flo, fhi = f(lo) - target, f(hi) - target
+        if flo * fhi > 0:
+            return None
+        for _ in range(n):
+            mid = (lo + hi) / 2
+            fm = f(mid) - target
+            if flo * fm <= 0:
+                hi, fhi = mid, fm
+            else:
+                lo, flo = mid, fm
+        return (lo + hi) / 2
+
+    def implied(self, price: float) -> dict:
+        """What the price assumes, base scenario: extra growth (pp on every forecast period), steady margin, steady ROIC."""
+        base_inputs = copy.deepcopy(self.i)
+        base_inputs["blend"]["steady_roic_anchor"] = {"enabled": False}
+        periods = self.fc_quarters + [self.fy1, self.fy2]
+        def blended_with_growth(x):
+            inp = copy.deepcopy(base_inputs)
+            inp["adjustments"] = [a for a in inp["adjustments"]] + [{"line": "Total revenue", "period_key": k, "bear": 0, "base": x, "bull": 0} for k in periods]
+            m = Model(inp)
+            s = m.scenario_series("base"); e = m.extrapolate("base", s); w = m.wacc()
+            return m.blend_target(m.dcf("base", s, e, w)["target"], m.multiples("base", s)["target"])
+        def dcf_with(key, x):
+            inp = copy.deepcopy(base_inputs)
+            inp["scenarios"]["base"][key] = x
+            m = Model(inp)
+            s = m.scenario_series("base"); e = m.extrapolate("base", s); w = m.wacc()
+            return m.dcf("base", s, e, w)["target"]
+        w = self.wacc()
+        return {"growth_pp": self._solve(-0.30, 0.30, blended_with_growth, price),
+                "steady_margin": self._solve(0.05, 0.70, lambda x: dcf_with("steady_margin", x), price),
+                "steady_roic": self._solve(w["wacc"] + 0.005, 1.5, lambda x: dcf_with("steady_roic", x), price),
+                "note": "growth_pp: percentage points added to consensus growth in every forecast period (house adjustments kept) so the base blended target equals the price; margin and ROIC: the base steady-state value at which the base DCF equals the price"}
+
+    def blend_target(self, dcf_target: float, pe_target: float) -> float:
+        dw = self.i["blend"]["dcf_weight"]
+        return dw * dcf_target + (1 - dw) * pe_target
+
     def run(self) -> dict:
         w = self.wacc()
-        out = {"inputs_as_of": self.i["as_of"], "price": self.i["market"]["price"], "wacc": w, "scenarios": {}}
+        anchor = self.anchor_roic(w)
+        out = {"inputs_as_of": self.i["as_of"], "price": self.i["market"]["price"], "wacc": w, "scenarios": {},
+               "returns": {**self.incremental_roic(), "steady_roic_base": self.i["scenarios"]["base"]["steady_roic"], "anchor": anchor}}
         for scn in SCENARIOS:
             s = self.scenario_series(scn)
             e = self.extrapolate(scn, s)
@@ -328,6 +416,27 @@ class Model:
         ni_h = lerp(b["multiples"]["q5_q8_net_income"], ba["multiples"]["q5_q8_net_income"], bu["multiples"]["q5_q8_net_income"])
         house["implied_multiple"] = house["multiples_target"] * ba["multiples"]["q5_q8_shares"] / ni_h if ni_h else None
         out["house"] = house
+        # probability-weighted value and a position size from reward to risk
+        S = self.i["scenarios"]
+        probs = {k: S[k].get("probability", {"bear": 0.25, "base": 0.5, "bull": 0.25}[k]) for k in SCENARIOS}
+        tot = sum(probs.values()) or 1.0
+        probs = {k: v / tot for k, v in probs.items()}
+        price = self.i["market"]["price"]
+        ev = sum(probs[k] * out["scenarios"][k]["blended_target"] for k in SCENARIOS)
+        bear_t = out["scenarios"]["bear"]["blended_target"]
+        downside = bear_t / price - 1                       # negative when the bear value is below the price
+        rr = (ev - price) / (price - bear_t) if price > bear_t else float("inf")
+        sz = self.i["blend"].get("sizing") or {}
+        full_at = sz.get("full_at_reward_to_risk", 2.0)
+        neutral = sz.get("neutral", 0.5)
+        # linear in reward to risk: `neutral` at fair value, full at rr >= full_at, zero at rr <= -full_at (bear value far below price)
+        exposure = 1.0 if rr == float("inf") else max(0.0, min(1.0, neutral + (1 - neutral) * rr / full_at))
+        out["expected"] = {"probabilities": probs, "expected_target": ev, "expected_upside": ev / price - 1, "downside_to_bear": downside,
+                           "reward_to_risk": rr, "exposure": exposure, "full_at_reward_to_risk": full_at, "neutral": neutral}
+        try:
+            out["implied"] = self.implied(price)
+        except Exception as exc:  # noqa: BLE001
+            out["implied"] = {"error": str(exc)}
         out["checks"] = self.checks(out)
         return out
 
@@ -480,6 +589,10 @@ class Model:
         c = []
         g_max = max(v["terminal_growth"] for v in S.values())
         c.append({"check": "WACC above terminal growth", "value": w - g_max, "ok": w - g_max > 0})
+        r = out.get("returns", {})
+        if r.get("incremental_roic") is not None:
+            c.append({"check": "Realised 2-year incremental ROIC at or above the base steady-state ROIC", "value": [r["incremental_roic"], r["steady_roic_base"]],
+                      "ok": r["incremental_roic"] >= r["steady_roic_base"], "warn_only": True})
         c.append({"check": "Steady-state ROIC at or above WACC (all scenarios)", "value": min(v["steady_roic"] for v in S.values()) - w,
                   "ok": min(v["steady_roic"] for v in S.values()) >= w})
         t = [out["scenarios"][k]["blended_target"] for k in SCENARIOS]
@@ -517,6 +630,17 @@ def summary(out: dict) -> str:
     h = out["house"]
     lines.append(f"{'house':<10}{h['dcf_target']:>10,.0f}{h['multiples_target']:>10,.0f}{h['target']:>10,.0f}{h['upside']:>9.1%}"
                  f"{'':>10}{'':>8}{h['implied_multiple']:>9.1f}")
+    ex, im, r = out.get("expected", {}), out.get("implied", {}), out.get("returns", {})
+    if ex:
+        lines.append(f"expected   target {ex['expected_target']:,.0f} ({ex['expected_upside']:+.1%}), downside to bear {ex['downside_to_bear']:+.1%}, "
+                     f"reward/risk {ex['reward_to_risk']:.2f} -> exposure {ex['exposure']:.0%}")
+    if im and "growth_pp" in im:
+        g = f"{im['growth_pp'] * 100:+.1f}pp" if im['growth_pp'] is not None else "n/a"
+        mg = f"{im['steady_margin']:.1%}" if im['steady_margin'] is not None else "n/a"
+        rc = f"{im['steady_roic']:.1%}" if im['steady_roic'] is not None else "n/a"
+        lines.append(f"price implies: growth {g} vs consensus | steady margin {mg} | steady ROIC {rc}")
+    if r.get("incremental_roic") is not None:
+        lines.append(f"realised 2y incremental ROIC {r['incremental_roic']:.1%} vs steady {r['steady_roic_base']:.0%}" + (f" (anchored from {r['anchor']['template_base']:.0%})" if r.get('anchor') else ""))
     for c in out["checks"]:
         flag = "ok " if c["ok"] else ("!  " if c.get("warn_only") else "FAIL")
         val = c["value"]

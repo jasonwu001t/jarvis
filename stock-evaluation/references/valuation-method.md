@@ -74,6 +74,33 @@ EV/EBITDA, P/S or P/B extend `multiples()` the way the template's 估值 sheet d
 Scenario value = `dcf_weight × DCF + (1 − dcf_weight) × multiple`. House target =
 `base + p × (bull − base)` for p ≥ 0, `base + p × (base − bear)` for p < 0 (`blend.target_position`).
 
+## Rate-aware multiple (`blend.multiple_rate_aware`)
+
+A target multiple set when the 10-year was `rf_ref` is applied as `m × (rf_ref + ERP) / (rf + ERP)`,
+so the P/E leg does not silently drift as rates move. The stated multiple is kept for display.
+
+## Probability-weighted value and sizing (`scenarios.<k>.probability`, `blend.sizing`)
+
+Expected target = Σ p × blended scenario value. Reward to risk = (expected − price) / (price − bear
+value), infinite when the bear value is above the price. Exposure = `neutral + (1 − neutral) × rr /
+full_at_reward_to_risk`, clipped to 0..1: the neutral weight at fair value, full at the reward-to-risk
+threshold, zero when the bear value is that far below. This replaces "house = 5% toward bull" as the
+position signal; the house target is still reported.
+
+## Reverse DCF (`out["implied"]`)
+
+What the price assumes in the base scenario, each solved by bisection: percentage points added to
+consensus growth in every forecast period (house adjustments kept) so the blended target equals the
+price; the steady-state margin at which the base DCF equals the price; the steady-state ROIC likewise.
+Far less sensitive to terminal assumptions than the target itself; monitor it quarter by quarter.
+
+## Realised incremental ROIC and the anchor (`out["returns"]`, `blend.steady_roic_anchor`)
+
+ΔNOPAT (TTM now versus TTM `years` ago) over the net reinvestment of those years (capex + leases − D&A
++ ΔWC), reported quarters only. With the anchor enabled the base steady-state ROIC is pulled down to
+it when it is lower (floored at WACC + `floor_over_wacc`), and bear and bull shift by the same amount;
+a check warns whenever realised sits below the assumed steady state.
+
 ## Checks (fail = an input is wrong)
 
 WACC > g; steady ROIC ≥ WACC; bear ≤ base ≤ bull; terminal value ≤ 80% of EV (warning); base

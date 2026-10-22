@@ -37,8 +37,9 @@ same engine and report and adds its own playbook.
    wrong, not that the stock is. `reports/latest.html` is the deliverable: open it and look at it
    before handing it over.
 6. **Report back** with the call, not the mechanics: price versus bear / base / bull, the house target
-   and upside, the rule in force, what the next print has to show, and which manual inputs the number
-   depends on. Point at the HTML.
+   and upside, the probability-weighted exposure after the overlays, what the price implies (reverse
+   DCF), how the company's own guidance compares with the consensus block, what the next print has to
+   show, and which manual inputs the number depends on. Point at the HTML.
 7. **Keep it alive.** `references/monitoring.md` covers the daily protocol, the rules, rolling a newly
    filed quarter with `--apply-actuals`, and scheduling (the META job in AlphaResearch's crontab is the
    pattern). After an earnings print, re-underwrite: actuals versus the consensus the model carried,
@@ -77,7 +78,9 @@ price, yield, flows and the multiple. Note the choice in the playbook.
 | `scripts/report_html.py` | The HTML report renderer (loads the ticker folder's `narrative.py` when present). |
 | `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter. |
 | `scripts/new_ticker.py` | Scaffold a ticker folder with a commented `inputs.json`. |
-| `scripts/backtest.py` | Point-in-time backtest: rebuild the model at each earnings release + lag days, apply the rules, compare with buy-and-hold and SPY (see `references/monitoring.md`). |
+| `scripts/backtest.py` | Point-in-time backtest: rebuild the model at each earnings release + lag days under several streets and sizing variants, compare with buy-and-hold and SPY (see `references/monitoring.md`). |
+| `scripts/guidance.py` | Company guidance (next-quarter revenue, full-year capex and expenses) parsed from the 8-K press-release exhibit, cached per release. |
+| `scripts/overlays.py` | Market-risk overlays on the valuation signal: regime gate (NFCI, VIX, Baa spread), volatility scaling, trend staging. |
 | `references/valuation-method.md` | The method in English. |
 | `references/data-sources.md` | marketlens / atlas tool map: what is live, what is manual, how to fetch each. |
 | `references/inputs-schema.md` | Every key in `inputs.json`. |
