@@ -12,16 +12,23 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
     "method_source": "free text"
   },
   "market": {"price": 735.0, "price_date": "2026-10-13", "fx": 1.0, "adr_ratio": 1.0,
-             "market_cap_musd_override": null},            // null: price × diluted shares
+             "market_cap_musd_override": null,             // null: price × diluted shares
+             "shares_override": null},                     // optional: per-share divisor (美投 AMZN: 10783)
   "wacc": {"beta": 1.43, "risk_free": 0.05, "erp": 0.042, "pretax_cost_of_debt": 0.0413,
            "risk_free_mode": "dgs10",                      // dgs10 (live) | manual
-           "beta_mode": "adjusted_2y_weekly"},              // adjusted_2y_weekly (live) | manual
+           "beta_mode": "adjusted_2y_weekly",              // adjusted_2y_weekly (live) | manual
+           "mode": "capm", "value": null},                 // "manual" + value: fixed WACC (美投 AMZN 0.138); CAPM still shown
   "scenarios": {                                            // bear / base / bull, all five keys each
-    "bear": {"terminal_growth": 0.035, "steady_roic": 0.20, "steady_margin": 0.35, "steady_tax": 0.149, "target_multiple": 18},
+    "bear": {"terminal_growth": 0.035, "steady_roic": 0.20, "steady_margin": 0.35, "steady_tax": 0.149, "target_multiple": 18,
+             "exit_pe": 20},                                // only read when blend.terminal_mode is "exit_pe"
     "base": {...}, "bull": {...}
   },
   "blend": {"dcf_weight": 0.5, "target_position": 0.05,    // house target: fraction from base toward bull (negative: toward bear)
-            "multiple_type": "P/E", "earnings_basis": "GAAP", "convergence_years": 12,
+            "multiple_type": "P/E", "earnings_basis": "GAAP", "convergence_years": 12,   // 0 = no transition years
+            "terminal_mode": "gordon",                      // gordon (template) | exit_pe (last explicit year NI x exit_pe)
+            "valuation_date": "balance_sheet",              // balance_sheet (template) | fy_end (PVs restated at the current FY end)
+            "equity_bridge": true, "dcf_roll_forward": true, // false / false: 美投 AMZN (DCF total / shares, no roll-forward)
+            "sotp_addons": [],                              // 美投 TSLA: [{name, year, discount_rate, terminal_value: {bear, base, bull}, basis}]
             "sizing": {"full_at_reward_to_risk": 2.0, "neutral": 0.5},            // expected-value exposure (valuation-method.md)
             "multiple_rate_aware": {"enabled": true, "rf_ref": 0.05},             // m x (rf_ref + ERP)/(rf + ERP)
             "steady_roic_anchor": {"enabled": true, "years": 2, "floor_over_wacc": 0.02},
@@ -42,6 +49,7 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
     "Reality Labs": {"parent": null, "oi_line": "segoi:Reality Labs"}
   },
   "periods": [{"key": 20240, "year": 2024, "q": 0, "status": "actual"}, ..., {"key": 20280, "year": 2028, "q": 0, "status": "consensus"}],
+                                                            // consensus FYs beyond FY+2 (e.g. 20290..20310) extend the explicit period
   "lines": {                                                // {period key: value}; actual periods and the consensus block together
     "revenue": {}, "operating_income": {}, "pretax_income": {}, "income_tax": {}, "net_income": {},
     "adjustments": {}, "adjusted_net_income": {}, "diluted_shares": {}, "dps": {}, "dividends_total": {}, "buybacks": {},

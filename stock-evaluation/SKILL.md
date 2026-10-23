@@ -9,7 +9,7 @@ when_to_use: Any request to evaluate, value, model, monitor or re-underwrite a s
 Produces, for one ticker: a working valuation model (`inputs.json`), a comprehensive HTML report
 (the call, the argument, the full model, sensitivities, monitor) and a daily monitor that keeps the
 numbers current and tells the user whether the position still makes sense. The first instance is
-META (`tickers/META.md`, live in `~/AlphaResearch/research/META/`); every new ticker reuses the
+META (`tickers/META.md`, live in `~/AlphaResearch/research/META/`); AMZN, GOOG, MSFT, NVDA, TSM, PLTR and TSLA follow the 美投 exit-P/E / sum-of-the-parts variants (see `references/valuation-method.md`, each `tickers/<T>.md`); every new ticker reuses the
 same engine and report and adds its own playbook.
 
 ## Workflow
@@ -27,8 +27,13 @@ same engine and report and adds its own playbook.
    keyed in and date-stamped. Say plainly which inputs are manual and how old they are.
 4. **Build or update the ticker folder** `~/AlphaResearch/research/<TICKER>/`:
    - new ticker: `python3 scripts/new_ticker.py <TICKER> "<Company name>" --dir ~/AlphaResearch/research/<TICKER>`
-     scaffolds `inputs.json` with the schema and comments, then fill the history, consensus,
-     scenario assumptions and adjustments (see `references/inputs-schema.md`);
+     scaffolds `inputs.json`; then `python3 scripts/fill_from_atlas.py --dir … --since-fy <FY>` fills the
+     XBRL history, balance-sheet composites, segments (when the folder has a `segments.py` that parses
+     the company's press-release sentences; AMZN is the pattern) and a guidance street for the forecast
+     periods (next-quarter ranges from the press release, beat-adjusted, fading to trend). Then set the
+     scenario anchors from the company's own history, the adjustments that encode the thesis, the thesis
+     summary and rating (see `references/inputs-schema.md`). Replace the street with real consensus when
+     you have it; the report labels it until you do;
    - existing ticker: edit `inputs.json` (consensus block, assumptions, adjustments, rules);
    - write `narrative.py` for the company-specific argument (the META one is the pattern); without it
      the report renders a generic method walkthrough.
@@ -78,6 +83,7 @@ price, yield, flows and the multiple. Note the choice in the playbook.
 | `scripts/report_html.py` | The HTML report renderer (loads the ticker folder's `narrative.py` when present). |
 | `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter. |
 | `scripts/new_ticker.py` | Scaffold a ticker folder with a commented `inputs.json`. |
+| `scripts/fill_from_atlas.py` | Fill a ticker's history, balance composites, segments (via the folder's `segments.py`) and a guidance street from atlas and the press releases. |
 | `scripts/backtest.py` | Point-in-time backtest: rebuild the model at each earnings release + lag days under several streets and sizing variants, compare with buy-and-hold and SPY (see `references/monitoring.md`). |
 | `scripts/guidance.py` | Company guidance (next-quarter revenue, full-year capex and expenses) parsed from the 8-K press-release exhibit, cached per release. |
 | `scripts/overlays.py` | Market-risk overlays on the valuation signal: regime gate (NFCI, VIX, Baa spread), volatility scaling, trend staging. |

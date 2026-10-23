@@ -13,6 +13,12 @@ workbook to the dollar. Units: USD millions unless per share; rates as fractions
   gliding linearly to the steady state.
 - **Perpetual** after that: terminal growth and steady-state ROIC.
 
+**Exit-multiple variant (美投's AMZN method, `blend.terminal_mode: "exit_pe"`).** Consensus annual
+periods beyond FY+2 (status `consensus`, q 0) extend the explicit period; the last of them is the
+terminal year. `blend.convergence_years: 0` removes the transition entirely, so the timeline is
+actuals → explicit years → terminal value. The report's sensitivity grids switch to exit P/E × WACC
+and capex × margin-path when this mode is on.
+
 ## Adjustments (the house view)
 
 An adjustment is `(line, period, pp per scenario)`: percentage points added to consensus growth of a
@@ -50,17 +56,34 @@ incremental revenue; finance leases keep their FY+2 share of capex.
 the last transition year. Cash flows are discounted mid-year from the balance-sheet date; the current
 year's stub (unreported quarters only) to the midpoint of the remaining half year.
 
+**Exit P/E** (`terminal_mode: "exit_pe"`): `TV = net income(last explicit year) × scenarios.<k>.exit_pe`,
+discounted from the end of that year; no transition years and no Gordon formula. `blend.valuation_date:
+"fy_end"` restates every present value at the current fiscal year end instead of the balance-sheet date
+(美投 states "fair value at end-2026"); the default `"balance_sheet"` keeps the template convention.
+
+**Sum-of-the-parts add-ons** (`blend.sotp_addons`, 美投's TSLA method): a list of businesses valued outside the
+DCF, each `{name, year, discount_rate, terminal_value (number or {bear, base, bull}), basis}`. The engine
+discounts `terminal_value` from the end of `year` to the valuation date at `discount_rate` and adds it per
+share to the DCF value; `dcf["core_per_share"]` keeps the DCF-only figure and `dcf["addons"]` the parts. The
+DCF lines then model only the core business (TSLA: cars), with the history consolidated.
+
 ## Equity bridge and DCF target
 
 Equity = EV − net debt (interest-bearing debt incl. finance leases − cash and marketable securities)
 − minorities + investments (equity-method + non-marketable). Per diluted share (latest quarter),
 × (1 + cost of equity) to roll 12 months forward, − the next four quarters' dividends per share.
+`blend.equity_bridge: false` skips the bridge (equity = DCF total), `blend.dcf_roll_forward: false`
+skips the roll-forward, `market.shares_override` replaces the diluted count: the three switches the
+美投 AMZN method uses (DCF total / 10,783m shares, stated at end-2026, no bridge).
 
 ## WACC
 
 Cost of equity = risk-free + beta × ERP. After-tax cost of debt = pretax cost × (1 − TTM effective
 tax rate over the last four quarters). Weights: market cap (price × diluted shares, or the override)
 versus debt. Beta is Bloomberg-style: 2-year weekly raw beta vs SPY, adjusted 0.67 × raw + 0.33.
+`wacc.mode: "manual"` with `wacc.value` overrides the computed WACC (美投 AMZN: the average of
+Bloomberg's and FactSet's, 13.8%); the CAPM cost of equity is still computed for display and the
+roll-forward, and the report's rate sensitivity steps the manual WACC instead of the risk-free rate.
 
 ## The multiple leg
 

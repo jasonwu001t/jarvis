@@ -141,24 +141,39 @@ def dcf_table(d: dict) -> str:
             f"<tbody>{rows}</tbody></table></div>")
 
 
-def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str) -> str:
+def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str, B: dict = None) -> str:
     d, mu = sc["dcf"], sc["multiples"]
-    lines = [
-        ("PV of explicit-period FCFF (through FY+2)", m(d["pv_stage1"])),
-        ("PV of transition-period FCFF (FY+3 … FY+14)", m(d["pv_stage2"])),
-        (f"Terminal value: NOPAT 2041 × (1 − g/ROIC) / (WACC − g), g {pc(S['terminal_growth'])}, ROIC {pc(S['steady_roic'], 0)}", m(d["terminal_value"])),
-        (f"PV of terminal value (discounted {d['t_terminal']:.2f} years)", m(d["pv_terminal"])),
-        ("<b>Enterprise value</b>", f"<b>{m(d['enterprise_value'])}</b>"),
-        ("Less net debt (plus net cash)", m(-d["net_debt"])),
-        ("Plus investments (equity-method + non-marketable)", m(d["investments"])),
-        ("<b>Equity value</b>", f"<b>{m(d['equity_value'])}</b>"),
-        ("Per diluted share, at the balance-sheet date", usd(d["value_per_share"], 2)),
-        (f"× (1 + cost of equity {pc(w['cost_of_equity'], 2)}): value 12 months out", usd(d["value_per_share"] * (1 + w["cost_of_equity"]), 2)),
-        ("Less next-12-month dividends per share", usd(-d["ntm_dps"], 2)),
-        ("<b>DCF target</b>", f"<b>{usd(d['target'], 2)}</b>"),
-        ("Terminal value as a share of EV", pc(d["terminal_share_of_ev"], 0)),
-        ("Implied exit EV / EBITDA (2040)", f"{d['implied_exit_ev_ebitda']:.1f}x" if d["implied_exit_ev_ebitda"] else "—"),
-    ]
+    B = B or {}
+    exit_pe = d.get("terminal_mode") == "exit_pe"
+    at = "the fiscal year end" if B.get("valuation_date") == "fy_end" else "the balance-sheet date"
+    last_yr = d["rows"][-1]["period"] // 10
+    lines = [(f"PV of explicit-period FCFF (through FY{last_yr})" if exit_pe else "PV of explicit-period FCFF (through FY+2)", m(d["pv_stage1"]))]
+    if not exit_pe:
+        lines.append(("PV of transition-period FCFF (FY+3 … FY+14)", m(d["pv_stage2"])))
+    if exit_pe:
+        lines.append((f"Terminal value: FY{last_yr} net income {m(d['terminal_net_income'])} × exit P/E {d['exit_pe']:.0f}x", m(d["terminal_value"])))
+    else:
+        lines.append((f"Terminal value: NOPAT 2041 × (1 − g/ROIC) / (WACC − g), g {pc(S['terminal_growth'])}, ROIC {pc(S['steady_roic'], 0)}", m(d["terminal_value"])))
+    lines += [(f"PV of terminal value (discounted {d['t_terminal']:.2f} years from the balance-sheet date to {at})", m(d["pv_terminal"])),
+              ("<b>Enterprise value</b>", f"<b>{m(d['enterprise_value'])}</b>")]
+    if B.get("equity_bridge", True):
+        lines += [("Less net debt (plus net cash)", m(-d["net_debt"])), ("Plus investments (equity-method + non-marketable)", m(d["investments"]))]
+    else:
+        lines.append(("No net-debt bridge: equity value taken as the DCF total (the method divides it by the share count directly)", ""))
+    lines += [("<b>Equity value</b>", f"<b>{m(d['equity_value'])}</b>")]
+    if d.get("addons"):
+        lines.append((f"Core business per share, at {at}", usd(d["core_per_share"], 2)))
+        for ad in d["addons"]:
+            lines.append((f"+ {esc(ad['name'])}: {m(ad['terminal_value'])} at end-{ad['year']} ({esc(ad['basis'])}), discounted {ad['t']:.1f} years at {pc(ad['discount_rate'], 1)} = {m(ad['pv'])}", usd(ad["per_share"], 2)))
+    lines.append((f"Per diluted share, at {at}", usd(d["value_per_share"], 2)))
+    if B.get("dcf_roll_forward", True):
+        lines += [(f"× (1 + cost of equity {pc(w['cost_of_equity'], 2)}): value 12 months out", usd(d["value_per_share"] * (1 + w["cost_of_equity"]), 2)),
+                  ("Less next-12-month dividends per share", usd(-d["ntm_dps"], 2))]
+    else:
+        lines.append(("No roll-forward: the DCF target is the value per share as stated", ""))
+    lines += [("<b>DCF target</b>", f"<b>{usd(d['target'], 2)}</b>"), ("Terminal value as a share of EV", pc(d["terminal_share_of_ev"], 0))]
+    if not exit_pe:
+        lines.append(("Implied exit EV / EBITDA (2040)", f"{d['implied_exit_ev_ebitda']:.1f}x" if d["implied_exit_ev_ebitda"] else "—"))
     pe = [
         (f"Quarters 5-8 GAAP net income (w = {mu['weight_fy1']:.2f} on FY+1, {1 - mu['weight_fy1']:.2f} on FY+2)", m(mu["q5_q8_net_income"])),
         ("Quarters 5-8 diluted shares (m)", m(mu["q5_q8_shares"])),
@@ -168,7 +183,8 @@ def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str) -> str:
         ("Implied P/E on FY+1 / FY+2 EPS", f"{mu['implied_pe_fy1']:.1f}x / {mu['implied_pe_fy2']:.1f}x"),
         (f"P/E the current price ({usd(price, 2)}) pays on quarters 5-8 EPS", f"{mu['price_implied_multiple']:.1f}x"),
     ]
-    blend = [("DCF target × 50%", usd(d["target"] * 0.5, 2)), ("P/E target × 50%", usd(mu["target"] * 0.5, 2)),
+    dw = B.get("dcf_weight", 0.5)
+    blend = [(f"DCF target × {pc(dw, 0)}", usd(d["target"] * dw, 2)), (f"P/E target × {pc(1 - dw, 0)}", usd(mu["target"] * (1 - dw), 2)),
              (f"<b>{label} blended target</b>", f"<b>{usd(sc['blended_target'], 2)}</b>"), ("vs price", pc(sc["upside"], 1, True))]
 
     def tbl(title, rows):
@@ -192,38 +208,94 @@ def wacc_table(w: dict, inputs: dict) -> str:
 # ----------------------------------------------------------------------------------------- sensitivities
 def sensitivities(inputs: dict) -> dict:
     base_in = copy.deepcopy(inputs)
-    roics, margins = (0.20, 0.25, 0.30), (0.34, 0.36, 0.38)
-    grid = []
-    for r in roics:
-        row = []
-        for mg in margins:
-            s = copy.deepcopy(base_in)
-            s["scenarios"]["base"]["steady_roic"], s["scenarios"]["base"]["steady_margin"] = r, mg
-            row.append(mm.Model(s).run()["scenarios"]["base"]["dcf"]["target"])
-        grid.append(row)
-    rfs = (0.040, 0.045, 0.050, 0.055)
-    rf_row = []
-    for rf in rfs:
-        s = copy.deepcopy(base_in)
-        s["wacc"]["risk_free"] = rf
-        o = mm.Model(s).run()
-        rf_row.append((rf, o["wacc"]["wacc"], o["scenarios"]["base"]["dcf"]["target"], o["scenarios"]["base"]["blended_target"]))
+    exit_pe = base_in["blend"].get("terminal_mode") == "exit_pe"
+    manual_wacc = base_in["wacc"].get("mode") == "manual"
+    m0 = mm.Model(base_in)
+    y1k, y2k = m0.fy1, m0.fy2
     out = mm.Model(base_in).run()
+    w0 = out["wacc"]["wacc"]
+    if exit_pe:
+        # the two subjective terminal inputs of the exit-multiple method: the exit P/E and the discount rate
+        pe0 = base_in["scenarios"]["base"]["exit_pe"]
+        roics, margins = tuple(pe0 + d for d in (-4, -2, 0, 2, 4)), tuple(round(w0 + d, 4) for d in (-0.01, 0.0, 0.01))
+        grid = []
+        for pe in roics:
+            row = []
+            for wv in margins:
+                s = copy.deepcopy(base_in)
+                s["scenarios"]["base"]["exit_pe"] = pe
+                s["wacc"]["mode"], s["wacc"]["value"] = "manual", wv
+                row.append(mm.Model(s).run()["scenarios"]["base"]["dcf"]["target"])
+            grid.append(row)
+    else:
+        roics, margins = (0.20, 0.25, 0.30), (0.34, 0.36, 0.38)
+        grid = []
+        for r in roics:
+            row = []
+            for mg in margins:
+                s = copy.deepcopy(base_in)
+                s["scenarios"]["base"]["steady_roic"], s["scenarios"]["base"]["steady_margin"] = r, mg
+                row.append(mm.Model(s).run()["scenarios"]["base"]["dcf"]["target"])
+            grid.append(row)
+    rf_row = []
+    if manual_wacc:
+        for d in (-0.02, -0.01, 0.0, 0.01, 0.02):
+            s = copy.deepcopy(base_in)
+            s["wacc"]["value"] = w0 + d
+            o = mm.Model(s).run()
+            rf_row.append((None, o["wacc"]["wacc"], o["scenarios"]["base"]["dcf"]["target"], o["scenarios"]["base"]["blended_target"]))
+    else:
+        for rf in (0.040, 0.045, 0.050, 0.055):
+            s = copy.deepcopy(base_in)
+            s["wacc"]["risk_free"] = rf
+            o = mm.Model(s).run()
+            rf_row.append((rf, o["wacc"]["wacc"], o["scenarios"]["base"]["dcf"]["target"], o["scenarios"]["base"]["blended_target"]))
+    cap_factors = (1.0, 0.8, 0.6, 0.4)
+    marg_steps = (-0.02, 0.0, 0.02)
+    cap_grid, cap_inten = [], []
+    rev2 = float(base_in["lines"]["revenue"][str(y2k)])
+    for f in cap_factors:
+        row = []
+        for dm in marg_steps:
+            s_ = copy.deepcopy(base_in)
+            for yk in (y1k, y2k):
+                s_["lines"]["capex"][str(yk)] = float(s_["lines"]["capex"][str(yk)]) * f
+                if str(yk) in s_["lines"].get("finance_lease_additions", {}):
+                    s_["lines"]["finance_lease_additions"][str(yk)] = float(s_["lines"]["finance_lease_additions"][str(yk)]) * f
+            if exit_pe:
+                # no steady state: shift the operating-margin path of every explicit forecast year instead
+                for yk in [m0.fy1, m0.fy2] + list(m0.extra_years):
+                    s_["adjustments"].append({"line": "Operating margin", "period_key": yk, "bear": 0.0, "base": dm, "bull": 0.0})
+            else:
+                s_["scenarios"]["base"]["steady_margin"] = base_in["scenarios"]["base"]["steady_margin"] + dm
+            row.append(mm.Model(s_).run()["scenarios"]["base"]["dcf"]["target"])
+        cap_grid.append(row)
+        cap_inten.append(float(base_in["lines"]["capex"][str(y2k)]) * f / rev2)
     eps = {k: out["scenarios"][k]["multiples"]["q5_q8_eps"] for k in SCN}
     targets = {k: inputs["scenarios"][k]["target_multiple"] for k in SCN}
     lo, hi = int(min(targets.values())) - 1, int(max(targets.values())) + 2
     mults = tuple(range(lo, hi + 1))
     pe_grid = [[eps[k] * x for x in mults] for k in SCN]
-    return {"roics": roics, "margins": margins, "grid": grid, "rfs": rf_row, "eps": eps, "mults": mults, "pe_grid": pe_grid, "targets": targets}
+    return {"roics": roics, "margins": margins, "grid": grid, "rfs": rf_row, "eps": eps, "mults": mults, "pe_grid": pe_grid, "targets": targets,
+            "cap_factors": cap_factors, "cap_inten": cap_inten, "marg_steps": marg_steps, "cap_grid": cap_grid, "y2": y2k,
+            "base_margin": base_in["scenarios"]["base"]["steady_margin"], "exit_pe": exit_pe, "manual_wacc": manual_wacc,
+            "base_exit_pe": base_in["scenarios"]["base"].get("exit_pe"), "wacc0": w0, "last_explicit": m0.last_explicit}
 
 
 def sens_html(sn: dict, out: dict) -> str:
     base = out["scenarios"]["base"]
-    g = "<div class='tbl'><table><thead><tr><th>Base DCF target</th>" + "".join(f"<th>margin {pc(x, 0)}</th>" for x in sn["margins"]) + "</tr></thead><tbody>"
-    for r, row in zip(sn["roics"], sn["grid"]):
-        g += f"<tr><th>steady ROIC {pc(r, 0)}</th>" + "".join(
-            f"<td class='num{' hl' if (abs(r - 0.25) < 1e-9 and abs(x - 0.36) < 1e-9) else ''}'>{usd(v)}</td>" for x, v in zip(sn["margins"], row)) + "</tr>"
-    g += "</tbody></table></div>"
+    if sn["exit_pe"]:
+        g = "<div class='tbl'><table><thead><tr><th>Base DCF target</th>" + "".join(f"<th>WACC {pc(x, 1)}</th>" for x in sn["margins"]) + "</tr></thead><tbody>"
+        for r, row in zip(sn["roics"], sn["grid"]):
+            g += f"<tr><th>exit P/E {r:.0f}x</th>" + "".join(
+                f"<td class='num{' hl' if (abs(r - sn['base_exit_pe']) < 1e-9 and abs(x - sn['wacc0']) < 1e-6) else ''}'>{usd(v)}</td>" for x, v in zip(sn["margins"], row)) + "</tr>"
+        g += "</tbody></table></div>"
+    else:
+        g = "<div class='tbl'><table><thead><tr><th>Base DCF target</th>" + "".join(f"<th>margin {pc(x, 0)}</th>" for x in sn["margins"]) + "</tr></thead><tbody>"
+        for r, row in zip(sn["roics"], sn["grid"]):
+            g += f"<tr><th>steady ROIC {pc(r, 0)}</th>" + "".join(
+                f"<td class='num{' hl' if (abs(r - 0.25) < 1e-9 and abs(x - 0.36) < 1e-9) else ''}'>{usd(v)}</td>" for x, v in zip(sn["margins"], row)) + "</tr>"
+        g += "</tbody></table></div>"
     p = "<div class='tbl'><table><thead><tr><th>P/E target = quarters 5-8 EPS × multiple</th>" + "".join(f"<th>{x}x</th>" for x in sn["mults"]) + "</tr></thead><tbody>"
     for k, row in zip(SCN, sn["pe_grid"]):
         tgt = sn["targets"][k]
@@ -231,11 +303,23 @@ def sens_html(sn: dict, out: dict) -> str:
     p += "</tbody></table></div>"
     r = "<div class='tbl'><table><thead><tr><th>Risk-free rate</th><th>WACC</th><th>Base DCF</th><th>Base blended</th></tr></thead><tbody>"
     for rf, w, d, b in sn["rfs"]:
-        r += f"<tr><th>{pc(rf, 2)}</th><td class='num'>{pc(w, 2)}</td><td class='num'>{usd(d)}</td><td class='num'>{usd(b)}</td></tr>"
+        r += f"<tr><th>{pc(rf, 2) if rf is not None else 'manual WACC'}</th><td class='num'>{pc(w, 2)}</td><td class='num'>{usd(d)}</td><td class='num'>{usd(b)}</td></tr>"
     r += "</tbody></table></div>"
-    return (f"<p>Base DCF ({usd(base['dcf']['target'])}) against the two most subjective steady-state assumptions. The highlighted cell is the house base case.</p>{g}"
-            f"<p>The P/E leg is linear in the multiple: every turn of P/E is worth about {usd(sn['eps']['base'])} per share on base-case EPS.</p>{p}"
-            f"<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>{r}")
+    cg = (f"<div class='tbl'><table><thead><tr><th>Base DCF target: FY+1/FY+2 capex scaled, FY{sn['y2'] // 10} intensity shown</th>"
+          + "".join((f"<th>margin path {pc(d, 0, True)}</th>" if sn["exit_pe"] else f"<th>steady margin {pc(sn['base_margin'] + d, 0)}</th>") for d in sn["marg_steps"]) + "</tr></thead><tbody>")
+    for f, inten, row in zip(sn["cap_factors"], sn["cap_inten"], sn["cap_grid"]):
+        cg += f"<tr><th>capex ×{f:.1f} ({pc(inten, 0)} of revenue)</th>" + "".join(
+            f"<td class='num{' hl' if (abs(f - 1.0) < 1e-9 and abs(d) < 1e-9) else ''}'>{usd(v)}</td>" for d, v in zip(sn["marg_steps"], row)) + "</tr>"
+    cg += "</tbody></table></div>"
+    if sn["exit_pe"]:
+        intro = f"<p>Base DCF ({usd(base['dcf']['target'])}) against the two subjective terminal inputs of the exit-multiple method: the exit P/E on FY{sn['last_explicit'] // 10} net income and the discount rate. The highlighted cell is the house base case.</p>{g}"
+        cap = f"<p>Capex intensity and the margin path: the grid scales FY+1 and FY+2 capex (and leases) and shifts the operating margin of every explicit forecast year by the stated points.</p>{cg}"
+        rate = "<p>Discount rate: the WACC is set manually in this model (the average of Bloomberg's and FactSet's), so the live 10-year yield does not move it; the table steps the WACC instead.</p>" if sn["manual_wacc"] else "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
+    else:
+        intro = f"<p>Base DCF ({usd(base['dcf']['target'])}) against the two most subjective steady-state assumptions. The highlighted cell is the house base case.</p>{g}"
+        cap = f"<p>Capex intensity in the explicit period sets where the 12-year reinvestment glide starts, so for a capital-heavy name it is the swing assumption of the DCF leg: the grid scales FY+1 and FY+2 capex (and leases) and shifts the steady margin.</p>{cg}"
+        rate = "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
+    return (intro + cap + f"<p>The P/E leg is linear in the multiple: every turn of P/E is worth about {usd(sn['eps']['base'])} per share on base-case EPS.</p>{p}" + rate + r)
 
 
 # ------------------------------------------------------------------------------------ position block
@@ -338,6 +422,9 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     bl_label = base_tpl.get("label", "Baseline")
     co, tk = inputs["company"]["name"], inputs["company"]["ticker"]
     tm = S["base"]["target_multiple"]
+    dw = inputs["blend"].get("dcf_weight", 0.5)
+    exit_pe = inputs["blend"].get("terminal_mode") == "exit_pe"
+    blend_label = "100% DCF (P/E leg shown for reference)" if dw >= 0.999 else f"{pc(dw, 0)} DCF + {pc(1 - dw, 0)} P/E"
     today = dt.date.today().isoformat()
     price_date = live.get("price", {}).get("date", inputs["market"].get("price_date"))
     cols = model.period_meta()
@@ -384,10 +471,20 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
                                 *[pc(sum(adj(line, k, x) for k in model.fc_quarters) / len(model.fc_quarters), 0, True) for x in SCN], ""))
         matrix_rows.append((f"{nice(line)} {unit} vs consensus, FY{y1 // 10} / FY{y2 // 10}",
                             *[f"{pc(adj(line, y1, x), 0, True)} / {pc(adj(line, y2, x), 0, True)}" for x in SCN], ""))
+    if exit_pe:
+        le = model.last_explicit
+        matrix_rows += [
+            (f"FY{le // 10} operating margin", *[pc(tables[x]["margin"].get(le), 1) for x in SCN], ""),
+            (f"FY{le // 10} net income", *[bn(tables[x]["net_income"].get(le), 0) for x in SCN], ""),
+            (f"Exit P/E on FY{le // 10} net income (terminal)", *[f"{S[x]['exit_pe']:.0f}x" for x in SCN], ""),
+        ]
+    else:
+        matrix_rows += [
+            ("Steady-state ROIC (terminal)", *[pc(S[x]["steady_roic"], 0) for x in SCN], ""),
+            ("Steady-state operating margin", *[pc(S[x]["steady_margin"], 0) for x in SCN], ""),
+            ("Terminal growth", *[pc(S[x]["terminal_growth"], 1) for x in SCN], ""),
+        ]
     matrix_rows += [
-        ("Steady-state ROIC (terminal)", *[pc(S[x]["steady_roic"], 0) for x in SCN], ""),
-        ("Steady-state operating margin", *[pc(S[x]["steady_margin"], 0) for x in SCN], ""),
-        ("Terminal growth", *[pc(S[x]["terminal_growth"], 1) for x in SCN], ""),
         ("Target P/E on quarters 5-8 EPS", *[f"{S[x]['target_multiple']:.0f}x" for x in SCN], f"{h['implied_multiple']:.1f}x implied"),
         ("<b>What you get</b>", "", "", "", ""),
         (f"Revenue CAGR FY{fy - 1}-FY{fy + 4}", *[pc(s[x]["revenue_cagr_5y"], 1) for x in SCN], ""),
@@ -411,8 +508,6 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     first_pos = next((c["label"] for c in cols if c["annual"] and T["fcff"].get(c["key"], -1) > 0 and c["key"] > fy * 10), "—")
     cons_eps = inputs["lines"]["net_income"].get(str(y1), 0) * bm["weight_fy1"] + inputs["lines"]["net_income"].get(str(y2), 0) * (1 - bm["weight_fy1"])
     cons_eps = cons_eps / bm["q5_q8_shares"] if bm["q5_q8_shares"] else None
-    ad_q3 = T["seg:Advertising"].get(q3) if q3 else None
-    ad_q3_cons = inputs["lines"]["seg:Advertising"].get(str(q3)) if q3 else None
     roic_hist = [(c["label"], T["roic"].get(c["key"])) for c in cols if c["status"] == "actual" and c["annual"] and T["roic"].get(c["key"])]
 
     def article(title, body):
@@ -444,7 +539,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
             article("3. Discount rate and the bridge to a target", f"""<p>WACC <b>{pc(w['wacc'], 2)}</b>: risk-free {pc(inputs['wacc']['risk_free'], 2)}, ERP {pc(inputs['wacc']['erp'])}, beta {inputs['wacc']['beta']:.2f}.</p>{wacc_table(w, inputs)}
 <p>Enterprise value {bn(bs['dcf']['enterprise_value'])}, equity {bn(bs['dcf']['equity_value'])}, {usd(bs['dcf']['value_per_share'])} per share at {a['balance_sheet_date']}; rolled a year forward at the cost of equity less dividends: <b>base DCF target {usd(bs['dcf']['target'])}</b>.</p>"""),
             article("4. The multiple and the blend", f"""<p>Quarters 5-8 GAAP EPS {usd(bm['q5_q8_eps'], 2)} (consensus about {usd(cons_eps, 2)}) × {tm:.0f}x = <b>{usd(bm['target'])}</b>; own five-year forward range {R['pe5y_low']:.1f}x / {R['pe5y_avg']:.1f}x / {R['pe5y_high']:.1f}x, price today {bm['price_implied_multiple']:.1f}x.</p><div id='c_pe' class='chart short'></div>
-<p>50% DCF + 50% P/E: bear <b>{usd(s['bear']['blended_target'])}</b>, base <b>{usd(bs['blended_target'])}</b>, bull <b>{usd(s['bull']['blended_target'])}</b>; house target {usd(h['target'])} ({pc(h['upside'], 0, True)}).</p><div id='c_tgt' class='chart'></div>"""),
+<p>{blend_label}: bear <b>{usd(s['bear']['blended_target'])}</b>, base <b>{usd(bs['blended_target'])}</b>, bull <b>{usd(s['bull']['blended_target'])}</b>; house target {usd(h['target'])} ({pc(h['upside'], 0, True)}).</p><div id='c_tgt' class='chart'></div>"""),
         ])
 
     # ---- model and valuation sections with scenario toggles
@@ -453,16 +548,18 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
 
     def model_section(k):
         T_ = tables[k]
-        return (f"<h4>Explicit period: actuals, consensus and house adjustments (FY{fy - 2} – FY{y2 // 10})</h4>"
-                + "".join(model_table(model, k, T_, cols, sec, "explicit") for sec in ("income", "cash", "balance", "nongaap"))
-                + f"<h4>Transition period FY{y2 // 10 + 1} – FY{model.years_ext[-1][0] // 10}: convergence to the {SCN_LABEL[k].lower()} steady state</h4>"
-                + model_table(model, k, T_, cols, "income", "transition")
-                + model_table(model, k, T_, cols, "cash", "transition")
-                + model_table(model, k, T_, cols, "nongaap", "transition"))
+        html = (f"<h4>Explicit period: actuals, consensus and house adjustments (FY{fy - 2} – FY{model.last_explicit // 10})</h4>"
+                + "".join(model_table(model, k, T_, cols, sec, "explicit") for sec in ("income", "cash", "balance", "nongaap")))
+        if model.years_ext:
+            html += (f"<h4>Transition period FY{model.last_explicit // 10 + 1} – FY{model.years_ext[-1][0] // 10}: convergence to the {SCN_LABEL[k].lower()} steady state</h4>"
+                     + model_table(model, k, T_, cols, "income", "transition")
+                     + model_table(model, k, T_, cols, "cash", "transition")
+                     + model_table(model, k, T_, cols, "nongaap", "transition"))
+        return html
 
     def valuation_section(k):
         sc = s[k]
-        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'])}{bridge_table(sc, w, S[k], price, SCN_LABEL[k])}"
+        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'])}{bridge_table(sc, w, S[k], price, SCN_LABEL[k], inputs["blend"])}"
 
     toggle = "<div class='toggle' role='tablist'>" + "".join(
         f"<button role='tab' data-scn='{k}' class='{'on' if k == 'base' else ''}'>{SCN_LABEL[k]}</button>" for k in SCN) + "</div>"
@@ -477,7 +574,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
                 ("Consensus block", f"{a['consensus_date']} — {esc(a['consensus_source'])}"),
                 ("Price used", f"{usd(price, 2)} ({price_date})"), ("DCF weight / multiple type / earnings basis", f"{pc(inputs['blend']['dcf_weight'], 0)} / {inputs['blend']['multiple_type']} / {inputs['blend']['earnings_basis']}"),
                 ("House position between base and bull", pc(inputs["blend"]["target_position"], 0, True)), ("Rating", esc(inputs["rating"]["label"]))]
-    settings_html = "<div class='tbl'><table><tbody>" + "".join(f"<tr><td>{k_}</td><td>{v}</td></tr>" for k_, v in settings) + "</tbody></table></div>"
+    settings_html = "<div class='tbl wrap'><table><tbody>" + "".join(f"<tr><td>{k_}</td><td>{v}</td></tr>" for k_, v in settings) + "</tbody></table></div>"
 
     # ---- monitor block
     rules_html = "".join(f"<li class='{'fired' if r['fired'] else ''}'><b>{esc(r['name'])}</b> — {esc(r['action'])} <code>{esc(r['when'])}</code></li>" for r in rules_eval)
@@ -540,7 +637,7 @@ p{{margin:8px 0}} .sub{{color:var(--text-2)}} small{{color:var(--muted)}}
 .verdict{{background:var(--surface-2);border-left:4px solid var(--s1);border-radius:10px;padding:14px 18px;font-size:16px}}
 .tiles{{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}} .tile{{background:var(--surface-2);border-radius:10px;padding:12px 14px}} .tile .k{{font-size:12px;color:var(--text-2)}} .tile .v{{font-size:26px;font-weight:650;letter-spacing:-.01em}} .tile .n{{font-size:12px;color:var(--muted)}}
 .tbl{{overflow-x:auto;margin:8px 0 16px;border:1px solid var(--line);border-radius:8px}} table{{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;font-variant-numeric:tabular-nums}}
-th,td{{padding:5px 9px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}} th:first-child,td:first-child{{text-align:left}}
+th,td{{padding:5px 9px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}} th:first-child,td:first-child{{text-align:left}} .wrap td{{white-space:normal;text-align:left}}
 thead th{{position:sticky;top:0;background:var(--surface-2);color:var(--text-2);font-weight:600;font-size:12px;z-index:2}} thead th:first-child{{left:0;z-index:3}} td:first-child{{white-space:normal;min-width:160px}}
 tbody th{{position:sticky;left:0;background:var(--surface);font-weight:500;text-align:left;z-index:1;min-width:230px;max-width:340px;white-space:normal}}
 tr.sect th{{background:var(--surface-2);color:var(--text);font-weight:650;text-align:left;padding-top:10px}} tr.sub th{{color:var(--text-2);font-size:12px}} tr.sub td{{color:var(--text-2);font-size:12px}}
@@ -564,9 +661,9 @@ details{{margin:8px 0}} summary{{cursor:pointer;color:var(--text-2)}} footer{{ma
 <div><div class="verdict">{verdict}</div>
 <h3>What to watch at the next print</h3>{watch}</div>
 <div class="tiles">
-<div class="tile"><div class="k">House 12-month target</div><div class="v">{usd(h['target'])}</div><div class="n">{(esc(bl_label) + " " + usd(base_tpl.get("house"))) if base_tpl.get("house") else "50% DCF + 50% P/E, house position " + pc(h["position"], 0, True)}</div></div>
+<div class="tile"><div class="k">House 12-month target</div><div class="v">{usd(h['target'])}</div><div class="n">{(esc(bl_label) + " " + usd(base_tpl.get("house"))) if base_tpl.get("house") else blend_label + ", house position " + pc(h["position"], 0, True)}</div></div>
 <div class="tile"><div class="k">Upside to house target</div><div class="v">{pc(h['upside'], 1, True)}</div><div class="n">{esc(fired[0]['name']) if fired else 'no rule fired'}</div></div>
-<div class="tile"><div class="k">Bear · Base · Bull</div><div class="v">{s['bear']['blended_target']:,.0f} · {s['base']['blended_target']:,.0f} · {s['bull']['blended_target']:,.0f}</div><div class="n">50% DCF + 50% P/E</div></div>
+<div class="tile"><div class="k">Bear · Base · Bull</div><div class="v">{s['bear']['blended_target']:,.0f} · {s['base']['blended_target']:,.0f} · {s['bull']['blended_target']:,.0f}</div><div class="n">{blend_label}</div></div>
 <div class="tile"><div class="k">Price-implied forward P/E</div><div class="v">{bm['price_implied_multiple']:.1f}x</div><div class="n">target {tm:.0f}x · 5y range {R['pe5y_low']:.1f}–{R['pe5y_high']:.1f}x</div></div>
 <div class="tile"><div class="k">WACC</div><div class="v">{pc(w['wacc'], 2)}</div><div class="n">rf {pc(inputs['wacc']['risk_free'], 2)} · β {inputs['wacc']['beta']:.2f} · ERP {pc(inputs['wacc']['erp'])}</div></div>
 <div class="tile"><div class="k">Base revenue CAGR FY{fy - 1}–FY{fy + 4}</div><div class="v">{pc(bs['revenue_cagr_5y'], 1)}</div><div class="n">quarters 5-8 op. margin {pc(bs['q5_q8_operating_margin'], 1)}</div></div>
@@ -596,7 +693,7 @@ details{{margin:8px 0}} summary{{cursor:pointer;color:var(--text-2)}} footer{{ma
 <h4>Settings</h4>{settings_html}
 <h4>Scenario parameters</h4>
 <div class="tbl"><table><thead><tr><th></th><th>Bear</th><th>Base</th><th>Bull</th></tr></thead><tbody>
-{''.join(f"<tr><th>{lbl}</th>" + ''.join(f"<td class='num'>{fmt(S[k][key])}</td>" for k in SCN) + "</tr>" for lbl, key, fmt in [("Terminal growth", "terminal_growth", lambda x: pc(x, 1)), ("Steady-state ROIC", "steady_roic", lambda x: pc(x, 0)), ("Steady-state operating margin", "steady_margin", lambda x: pc(x, 0)), ("Steady-state tax rate", "steady_tax", lambda x: pc(x, 1)), ("Target multiple", "target_multiple", lambda x: f"{x:.0f}x")])}
+{''.join(f"<tr><th>{lbl}</th>" + ''.join(f"<td class='num'>{fmt(S[k][key])}</td>" for k in SCN) + "</tr>" for lbl, key, fmt in [("Terminal growth", "terminal_growth", lambda x: pc(x, 1)), ("Steady-state ROIC", "steady_roic", lambda x: pc(x, 0)), ("Steady-state operating margin", "steady_margin", lambda x: pc(x, 0)), ("Steady-state tax rate", "steady_tax", lambda x: pc(x, 1)), ("Target multiple", "target_multiple", lambda x: f"{x:.0f}x")] + ([("Exit P/E on the last explicit year", "exit_pe", lambda x: f"{x:.0f}x")] if all("exit_pe" in S[k] for k in SCN) else []))}
 </tbody></table></div>
 <h4>Adjustments: percentage points added to consensus growth</h4>
 <div class="tbl"><table><thead><tr><th>Line</th><th>Period</th><th>Bear</th><th>Base</th><th>Bull</th></tr></thead><tbody>{adj_rows}</tbody></table></div>
@@ -625,8 +722,9 @@ const dark=matchMedia('(prefers-color-scheme: dark)').matches;
 const C={{s1:dark?'#3987e5':'#2a78d6',s2:dark?'#d95926':'#eb6834',s3:dark?'#199e70':'#1baf7a',s4:dark?'#c98500':'#eda100',text:dark?'#f0efec':'#0b0b0b',t2:dark?'#c3c2b7':'#52514e',grid:dark?'#3a3936':'#e6e4de',bg:'rgba(0,0,0,0)'}};
 const base={{paper_bgcolor:C.bg,plot_bgcolor:C.bg,font:{{color:C.t2,size:12}},margin:{{l:60,r:16,t:40,b:48}},hoverlabel:{{bgcolor:dark?'#242422':'#fff',font:{{color:C.text}}}}}};
 const cfg={{displayModeBar:false,responsive:true}};
+const plot=(id,d,l,c)=>document.getElementById(id)&&Plotly.newPlot(id,d,l,c);
 function targets(id){{
- Plotly.newPlot(id,[
+ plot(id,[
   {{type:'bar',x:D.tgt.names,y:D.tgt.dcf,name:'DCF',marker:{{color:C.s1}},hovertemplate:'%{{x}} DCF $%{{y:,.0f}}<extra></extra>'}},
   {{type:'bar',x:D.tgt.names,y:D.tgt.pe,name:'P/E',marker:{{color:C.s3}},hovertemplate:'%{{x}} P/E $%{{y:,.0f}}<extra></extra>'}},
   {{type:'scatter',mode:'markers+text',x:D.tgt.names,y:D.tgt.blend,name:'Blended',marker:{{color:C.text,size:10,symbol:'diamond'}},text:D.tgt.blend.map(v=>'$'+Math.round(v)),textposition:'top center',textfont:{{color:C.text}},hovertemplate:'%{{x}} blended $%{{y:,.0f}}<extra></extra>'}}],
@@ -636,19 +734,19 @@ function targets(id){{
    annotations:[{{x:3.5,y:D.price,xanchor:'right',yanchor:'bottom',text:'price $'+D.price.toFixed(0),showarrow:false,font:{{color:C.s2}}}}]}},cfg);
 }}
 targets('c_tgt_top'); targets('c_tgt');
-Plotly.newPlot('c_fc',[
+plot('c_fc',[
  {{type:'bar',x:D.fc.labels,y:D.fc.bear.map(v=>v/1000),name:'Bear',marker:{{color:C.s2}},hovertemplate:'%{{x}} bear $%{{y:,.1f}}bn<extra></extra>'}},
  {{type:'bar',x:D.fc.labels,y:D.fc.base.map(v=>v/1000),name:'Base',marker:{{color:C.s1}},hovertemplate:'%{{x}} base $%{{y:,.1f}}bn<extra></extra>'}},
  {{type:'bar',x:D.fc.labels,y:D.fc.bull.map(v=>v/1000),name:'Bull',marker:{{color:C.s3}},hovertemplate:'%{{x}} bull $%{{y:,.1f}}bn<extra></extra>'}}],
  {{...base,title:{{text:'Unlevered free cash flow by fiscal year, $bn (first column is the full current year; the DCF uses its second half)',font:{{size:14,color:C.text}},x:0}},barmode:'group',bargap:0.25,legend:{{orientation:'h',y:-0.22}},
   yaxis:{{gridcolor:C.grid,zerolinecolor:C.t2,tickprefix:'$',ticksuffix:'bn'}},xaxis:{{showgrid:false,tickangle:-45}},
   shapes:[{{type:'rect',xref:'x',yref:'paper',x0:-0.5,x1:D.fc.stage.lastIndexOf('explicit')+0.5,y0:0,y1:1,fillcolor:C.s1,opacity:0.07,line:{{width:0}}}}],
-  annotations:[{{x:D.fc.stage.lastIndexOf('explicit')/2,y:1,yref:'paper',text:'explicit (consensus)',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}},{{x:D.fc.stage.lastIndexOf('explicit')+1+(D.fc.labels.length-D.fc.stage.lastIndexOf('explicit')-1)/2,y:1,yref:'paper',text:'transition to steady state',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}}]}},cfg);
-Plotly.newPlot('c_rev',[
+  annotations:[{{x:D.fc.stage.lastIndexOf('explicit')/2,y:1,yref:'paper',text:'explicit (consensus)',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}}].concat(D.fc.stage.includes('transition')?[{{x:D.fc.stage.lastIndexOf('explicit')+1+(D.fc.labels.length-D.fc.stage.lastIndexOf('explicit')-1)/2,y:1,yref:'paper',text:'transition to steady state',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}}]:[])}},cfg);
+plot('c_rev',[
  {{type:'bar',x:D.rev.labels,y:D.rev.rev.map(v=>v/1000),name:'Revenue',marker:{{color:D.rev.labels.map((_,i)=>i<D.rev.n_hist?C.t2:C.s1)}},hovertemplate:'%{{x}} revenue $%{{y:,.0f}}bn<extra></extra>'}},
  {{type:'bar',x:D.rev.labels,y:D.rev.capex.map(v=>v/1000),name:'Capex',marker:{{color:D.rev.labels.map((_,i)=>i<D.rev.n_hist?C.grid:C.s2)}},hovertemplate:'%{{x}} capex $%{{y:,.0f}}bn<extra></extra>'}}],
  {{...base,title:{{text:'Base case: revenue and capex, $bn (grey = reported)',font:{{size:14,color:C.text}},x:0}},barmode:'group',bargap:0.2,legend:{{orientation:'h',y:-0.22}},yaxis:{{gridcolor:C.grid,zeroline:false,tickprefix:'$',ticksuffix:'bn'}},xaxis:{{showgrid:false,tickangle:-45}}}},cfg);
-Plotly.newPlot('c_pe',[
+plot('c_pe',[
  {{type:'scatter',mode:'lines',x:[D.pe.low,D.pe.high],y:[0,0],line:{{color:C.grid,width:6}},hoverinfo:'skip',showlegend:false}},
  {{type:'scatter',mode:'markers+text',x:[D.pe.low,D.pe.avg,D.pe.high],y:[0,0,0],text:['5y low '+D.pe.low+'x','5y average '+D.pe.avg+'x','5y high '+D.pe.high+'x'],textposition:['bottom center','bottom center','bottom center'],marker:{{color:C.t2,size:10}},hoverinfo:'skip',showlegend:false}},
  {{type:'scatter',mode:'markers+text',x:[D.pe.now],y:[0],text:['price today '+D.pe.now.toFixed(1)+'x'],textposition:'top center',marker:{{color:C.s2,size:12,symbol:'diamond'}},hoverinfo:'skip',showlegend:false}},

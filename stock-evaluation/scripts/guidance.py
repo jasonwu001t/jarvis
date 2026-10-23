@@ -24,10 +24,15 @@ import urllib.request
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
 QUARTER_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "q1": 1, "q2": 2, "q3": 3, "q4": 4}
 NUM = r"\$\s?(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*\$?\s?(\d+(?:\.\d+)?)\s*(billion|million)"
+NUM_B = r"\$\s?(\d+(?:\.\d+)?)\s*billion\s+and\s+\$\s?(\d+(?:\.\d+)?)\s*(billion)"   # "$197.5 billion and $202.0 billion"
 PATTERNS = {
+    # Meta style: "We expect third quarter 2026 total revenue to be in the range of $61-64 billion."
     "revenue": re.compile(r"(first|second|third|fourth|1st|2nd|3rd|4th|q[1-4])\s+quarter\s+(?:of\s+)?(?:fiscal\s+)?(20\d\d)\s+(?:total\s+)?revenue[^.]*?" + NUM, re.I),
     "capex": re.compile(r"(?:full[- ]year\s+)?(20\d\d)\s+capital\s+expenditures?[^.]*?" + NUM, re.I),
     "expenses": re.compile(r"(?:full[- ]year\s+)?(20\d\d)\s+total\s+expenses?[^.]*?" + NUM, re.I),
+    # Amazon style: "Third Quarter 2026 Guidance • Net sales are expected to be between $197.5 billion and $202.0 billion"
+    "revenue_amzn": re.compile(r"(first|second|third|fourth)\s+quarter\s+(20\d\d)\s+guidance.{0,160}?net\s+sales\s+are\s+expected\s+to\s+be\s+between\s+" + NUM_B, re.I | re.S),
+    "operating_income_amzn": re.compile(r"(first|second|third|fourth)\s+quarter\s+(20\d\d)\s+guidance.{0,600}?operating\s+income\s+is\s+expected\s+to\s+be\s+between\s+" + NUM_B, re.I | re.S),
 }
 
 
@@ -97,11 +102,16 @@ def _musd(v: str, unit: str) -> float:
 
 def parse(text: str) -> dict:
     out = {}
-    m = PATTERNS["revenue"].search(text)
+    m = PATTERNS["revenue"].search(text) or PATTERNS["revenue_amzn"].search(text)
     if m:
         q, y, lo, hi, unit = m.groups()
         out["revenue_next_quarter"] = {"period_key": int(y) * 10 + QUARTER_WORDS[q.lower()], "low": _musd(lo, unit), "high": _musd(hi, unit),
                                        "mid": (_musd(lo, unit) + _musd(hi, unit)) / 2, "text": m.group(0)[:200]}
+    m = PATTERNS["operating_income_amzn"].search(text)
+    if m:
+        q, y, lo, hi, unit = m.groups()
+        out["operating_income_next_quarter"] = {"period_key": int(y) * 10 + QUARTER_WORDS[q.lower()], "low": _musd(lo, unit), "high": _musd(hi, unit),
+                                                "mid": (_musd(lo, unit) + _musd(hi, unit)) / 2, "text": m.group(0)[:200]}
     for name in ("capex", "expenses"):
         m = PATTERNS[name].search(text)
         if m:

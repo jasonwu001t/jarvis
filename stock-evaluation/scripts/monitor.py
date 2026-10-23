@@ -124,7 +124,11 @@ def live_kpis(ticker: str) -> dict[str, dict]:
                 v = v / 1e6
             else:
                 v = v / 1e6
-            series[period_key(row["period"])] = {"value": v, "end": row["end"], "filed": row.get("filed"), "form": row.get("form")}
+            try:
+                key = period_key(row["period"])
+            except ValueError:            # a balance on no fiscal period is labelled by its date
+                continue
+            series[key] = {"value": v, "end": row["end"], "filed": row.get("filed"), "form": row.get("form")}
         out[k["id"]] = series
     return out
 
@@ -187,7 +191,7 @@ def live_insider(ticker: str) -> dict:
 
 def live_guidance(inputs: dict, folder: str) -> dict:
     """Latest press-release outlook (revenue next quarter, capex and expenses full year), via guidance.py (EDGAR, cached)."""
-    rows = guid.collect(inputs["company"]["ticker"], folder, since=(dt.date.today() - dt.timedelta(days=200)).isoformat())
+    rows = guid.collect(inputs["company"].get("filing_ticker") or inputs["company"]["ticker"], folder, since=(dt.date.today() - dt.timedelta(days=200)).isoformat())
     rows = [r for r in rows if r.get("parsed")]
     return rows[-1] if rows else {}
 
@@ -467,6 +471,7 @@ def main(argv: list[str]) -> int:
     live, new_q, avc, notes = {}, [], {}, []
     if not offline:
         t = inputs["company"]["ticker"]
+        ft = inputs["company"].get("filing_ticker") or t   # SEC data can sit under another share class (GOOG -> GOOGL)
         try:
             live["price"] = live_price(t)
             inputs["market"]["price"], inputs["market"]["price_date"] = live["price"]["price"], live["price"]["date"]
@@ -486,23 +491,23 @@ def main(argv: list[str]) -> int:
             except Exception as exc:  # noqa: BLE001
                 live["beta"] = {"error": str(exc)}
         try:
-            live["earnings"] = live_earnings(t)
+            live["earnings"] = live_earnings(ft)
         except Exception as exc:  # noqa: BLE001
             live["earnings"] = {"error": str(exc)}
-        for name, fn in (("macro", lambda: live_macro()), ("closes", lambda: live_closes(t)), ("insider", lambda: live_insider(t)),
+        for name, fn in (("macro", lambda: live_macro()), ("closes", lambda: live_closes(t)), ("insider", lambda: live_insider(ft)),
                          ("guidance", lambda: live_guidance(inputs, HERE))):
             try:
                 live[name] = fn()
             except Exception as exc:  # noqa: BLE001
                 live[name] = {"error": str(exc)}
         try:
-            kpis = live_kpis(t)
+            kpis = live_kpis(ft)
             live["_kpis"] = kpis
             new_q = detect_new_quarters(inputs, kpis)
             extras = {}
             for key in new_q:
                 avc[key] = actual_vs_consensus(inputs, kpis, key)
-                extras[key] = live_balance_sheet_extras(t, kpis["revenue"][key]["end"])
+                extras[key] = live_balance_sheet_extras(ft, kpis["revenue"][key]["end"])
             if apply and new_q:
                 notes = apply_actuals(inputs, kpis, new_q, extras)
                 with open(path, "w", encoding="utf-8") as fh:

@@ -39,8 +39,11 @@ class Model:
         self.latest_key = self.fy * 10 + self.q
         self.fc_quarters = [self.fy * 10 + k for k in range(self.q + 1, 5)]      # unreported quarters of the current FY
         self.fy1, self.fy2 = (self.fy + 1) * 10, (self.fy + 2) * 10                # consensus annual periods
+        # further annual periods carried in the consensus block (a street to FY+5, say) extend the explicit period
+        self.extra_years = sorted(int(p["key"]) for p in self.periods if p["q"] == 0 and p["status"] != "actual" and int(p["key"]) > self.fy2)
+        self.last_explicit = self.extra_years[-1] if self.extra_years else self.fy2
         self.n_conv = inputs["blend"].get("convergence_years", 12)
-        self.years_ext = [((self.fy + 2 + k) * 10, k) for k in range(1, self.n_conv + 1)]  # extrapolated FYs, step k
+        self.years_ext = [((self.last_explicit // 10 + k) * 10, k) for k in range(1, self.n_conv + 1)]  # extrapolated FYs, step k
 
     # ------------------------------------------------------------------ helpers
     def v(self, line: str, key: int, default=0.0) -> float:
@@ -80,18 +83,22 @@ class Model:
                 d[qk] = self.v(line, self.prior_year(qk)) * self.pp(seg, qk, scn)
             d_fy = sum(d.values())
             fy0 = self.fy * 10
-            c0, c1, c2 = self.v(line, fy0), self.v(line, self.fy1), self.v(line, self.fy2)
-            d[self.fy1] = (d_fy * c1 / c0 if c0 else 0.0) + (c0 + d_fy) * self.pp(seg, self.fy1, scn)
-            d[self.fy2] = (d[self.fy1] * c2 / c1 if c1 else 0.0) + (c1 + d[self.fy1]) * self.pp(seg, self.fy2, scn)
+            prev_k, prev_d = fy0, d_fy
+            for yk in [self.fy1, self.fy2] + self.extra_years:
+                cp, cc = self.v(line, prev_k), self.v(line, yk)
+                d[yk] = (prev_d * cc / cp if cp else 0.0) + (cp + prev_d) * self.pp(seg, yk, scn)
+                prev_k, prev_d = yk, d[yk]
             out[seg] = d
         # a "total revenue" adjustment line, if used, behaves like one more business line
         tot = {}
         for qk in self.fc_quarters:
             tot[qk] = self.v("revenue", self.prior_year(qk)) * sum(self.pp(a, qk, scn) for a in REVENUE_LINE_ALIASES)
         d_fy = sum(tot.values())
-        c0, c1, c2 = self.v("revenue", self.fy * 10), self.v("revenue", self.fy1), self.v("revenue", self.fy2)
-        tot[self.fy1] = (d_fy * c1 / c0 if c0 else 0.0) + (c0 + d_fy) * sum(self.pp(a, self.fy1, scn) for a in REVENUE_LINE_ALIASES)
-        tot[self.fy2] = (tot[self.fy1] * c2 / c1 if c1 else 0.0) + (c1 + tot[self.fy1]) * sum(self.pp(a, self.fy2, scn) for a in REVENUE_LINE_ALIASES)
+        prev_k, prev_d = self.fy * 10, d_fy
+        for yk in [self.fy1, self.fy2] + self.extra_years:
+            cp, cc = self.v("revenue", prev_k), self.v("revenue", yk)
+            tot[yk] = (prev_d * cc / cp if cp else 0.0) + (cp + prev_d) * sum(self.pp(a, yk, scn) for a in REVENUE_LINE_ALIASES)
+            prev_k, prev_d = yk, tot[yk]
         out["__total__"] = tot
         return out
 
@@ -112,7 +119,7 @@ class Model:
         """Revenue … FCFF for the forecast quarters, FY+1 and FY+2 under one scenario."""
         S = self.i["scenarios"][scn]
         dl = self.delta_revenue_lines(scn)
-        keys = self.fc_quarters + [self.fy1, self.fy2]
+        keys = self.fc_quarters + [self.fy1, self.fy2] + self.extra_years
         s = {k: {} for k in ["revenue", "operating_income", "pretax_income", "tax_rate", "net_income", "adjusted_net_income",
                              "diluted_shares", "eps", "dividends_total", "dps", "d_and_a", "sbc", "wc_increase",
                              "capex", "finance_lease_additions", "nopat", "fcff", "ebitda", "delta_revenue", "delta_oi"]}
@@ -148,9 +155,12 @@ class Model:
         actual_q = [self.fy * 10 + k for k in range(1, self.q + 1)]
         cons_q_sum = sum(self.v("capex", k) for k in actual_q + self.fc_quarters)
         adj_fy0 = sum(self.v("capex", k) for k in actual_q) + sum(s["capex"][k] for k in self.fc_quarters)
-        c0, c1, c2 = self.v("capex", self.fy * 10), self.v("capex", self.fy1), self.v("capex", self.fy2)
-        s["capex"][self.fy1] = c1 + (adj_fy0 - cons_q_sum) * (c1 / c0 if c0 else 0.0) + (c0 + adj_fy0 - cons_q_sum) * cap_pp(self.fy1)
-        s["capex"][self.fy2] = c2 + (s["capex"][self.fy1] - c1) * (c2 / c1 if c1 else 0.0) + s["capex"][self.fy1] * cap_pp(self.fy2)
+        c0 = self.v("capex", self.fy * 10)
+        prev_k, prev_adj, prev_cons = self.fy * 10, adj_fy0 - cons_q_sum + c0, c0
+        for yk in [self.fy1, self.fy2] + self.extra_years:
+            cc = self.v("capex", yk)
+            s["capex"][yk] = cc + (prev_adj - prev_cons) * (cc / prev_cons if prev_cons else 0.0) + prev_adj * cap_pp(yk)
+            prev_k, prev_adj, prev_cons = yk, s["capex"][yk], cc
         for k in keys:
             s["fcff"][k] = s["nopat"][k] + s["d_and_a"][k] - s["capex"][k] - s["finance_lease_additions"][k] - s["wc_increase"][k]
         return s
@@ -161,7 +171,8 @@ class Model:
         S = self.i["scenarios"][scn]
         g, m_ss, t_ss, roic = S["terminal_growth"], S["steady_margin"], S["steady_tax"], S["steady_roic"]
         N = self.n_conv
-        y2, y1 = self.fy2, self.fy1
+        y2 = self.last_explicit
+        y1 = self.extra_years[-2] if len(self.extra_years) >= 2 else (self.fy2 if self.extra_years else self.fy1)
         rev2, rev1 = s["revenue"][y2], s["revenue"][y1]
         g2 = rev2 / rev1 - 1
         m2 = s["operating_income"][y2] / rev2
@@ -176,7 +187,7 @@ class Model:
                              "reinvest_ratio", "capex", "finance_lease_additions", "nopat", "fcff", "ebitda"]}
         e["reinvest_ratio_start"], e["reinvest_ratio_steady"] = r2, r_ss
         prev_rev = rev2
-        for yk, k in self.years_ext:
+        for yk, k in self.years_ext:   # empty when convergence_years is 0 (exit-P/E valuations)
             f = k / N
             gr = g2 + (g - g2) * f
             rev = prev_rev * (1 + gr)
@@ -195,12 +206,12 @@ class Model:
             e["fcff"][yk] = nopat + da - capex - lease - wc
             e["ebitda"][yk] = oi + da
             prev_rev = rev
-        last = self.years_ext[-1][0]
-        e["terminal_nopat"] = e["nopat"][last] * (1 + g)          # NOPAT of the year after the horizon
+        last = self.years_ext[-1][0] if self.years_ext else y2
+        e["terminal_nopat"] = (e["nopat"][last] if self.years_ext else s["nopat"][y2]) * (1 + g)   # NOPAT of the year after the horizon
         e["implied_return_on_new_investment"] = {}
-        yrs = [self.fy2] + [yk for yk, _ in self.years_ext]
-        nop = {**{self.fy2: s["nopat"][self.fy2]}, **e["nopat"]}
-        reinv = {self.fy2: cap2 + lease2 - s["d_and_a"][y2] + s["wc_increase"][y2],
+        yrs = [y2] + [yk for yk, _ in self.years_ext]
+        nop = {**{y2: s["nopat"][y2]}, **e["nopat"]}
+        reinv = {y2: cap2 + lease2 - s["d_and_a"][y2] + s["wc_increase"][y2],
                  **{yk: e["capex"][yk] + e["finance_lease_additions"][yk] - e["d_and_a"][yk] + e["wc_increase"][yk] for yk, _ in self.years_ext}}
         for a, b in zip(yrs[:-1], yrs[1:]):
             e["implied_return_on_new_investment"][a] = (nop[b] - nop[a]) / reinv[a] if reinv[a] > 0 else None
@@ -221,8 +232,11 @@ class Model:
         t_ttm = 0.0 if pre <= 0 else min(1.0, max(0.0, tax / pre))
         kd = W["pretax_cost_of_debt"] * (1 - t_ttm)
         we = mcap / (mcap + debt)
+        wacc = we * ke + (1 - we) * kd
+        if W.get("mode") == "manual" and W.get("value") is not None:
+            wacc = W["value"]            # e.g. the average of Bloomberg's and FactSet's WACC, as the 美投 AMZN video does
         return {"cost_of_equity": ke, "market_cap": mcap, "debt": debt, "weight_equity": we, "weight_debt": 1 - we,
-                "ttm_tax_rate": t_ttm, "after_tax_cost_of_debt": kd, "wacc": we * ke + (1 - we) * kd}
+                "ttm_tax_rate": t_ttm, "after_tax_cost_of_debt": kd, "wacc": wacc, "computed_wacc": we * ke + (1 - we) * kd, "mode": W.get("mode", "capm")}
 
     # -------------------------------------------------------------------- DCF
     def dcf(self, scn: str, s: dict, e: dict, w: dict) -> dict:
@@ -238,31 +252,60 @@ class Model:
         mid = bs + (fy_end(self.fy) - bs) / 2
         t = (mid - bs).days / 365
         rows.append({"period": self.fy * 10, "stage": 1, "fcff": fc, "t": t, "df": 1 / (1 + wacc) ** t})
-        for yk, series in [(self.fy1, s), (self.fy2, s)] + [(yk, e) for yk, _ in self.years_ext]:
+        for yk, series in [(self.fy1, s), (self.fy2, s)] + [(yk, s) for yk in self.extra_years] + [(yk, e) for yk, _ in self.years_ext]:
             mid = fy_end(yk // 10) - dt.timedelta(days=182.6)
             t = (mid - bs).days / 365 + ((mid - bs).seconds / 86400) / 365
-            rows.append({"period": yk, "stage": 1 if yk <= self.fy2 else 2, "fcff": series["fcff"][yk], "t": t, "df": 1 / (1 + wacc) ** t})
+            rows.append({"period": yk, "stage": 1 if yk <= self.last_explicit else 2, "fcff": series["fcff"][yk], "t": t, "df": 1 / (1 + wacc) ** t})
         for r in rows:
             r["pv"] = r["fcff"] * r["df"]
         pv_stage1 = sum(r["pv"] for r in rows if r["stage"] == 1)
         pv_stage2 = sum(r["pv"] for r in rows if r["stage"] == 2)
-        last_end = fy_end(self.years_ext[-1][0] // 10)
-        t_tv = (last_end - bs).days / 365 - 0.5
-        tv = e["terminal_nopat"] * (1 - g / roic) / (wacc - g)
+        B = self.i["blend"]
+        tmode = B.get("terminal_mode", "gordon")
+        if tmode == "exit_pe":
+            # 美投 AMZN style: the last explicit year's net income x an exit P/E, discounted from that year end; no transition years
+            last_end = fy_end(self.last_explicit // 10)
+            t_tv = (last_end - bs).days / 365
+            exit_pe = S.get("exit_pe", S.get("target_multiple"))
+            tv = s["net_income"][self.last_explicit] * exit_pe
+        else:
+            last_end = fy_end(self.years_ext[-1][0] // 10) if self.years_ext else fy_end(self.last_explicit // 10)
+            t_tv = (last_end - bs).days / 365 - 0.5
+            tv = e["terminal_nopat"] * (1 - g / roic) / (wacc - g)
         pv_tv = tv / (1 + wacc) ** t_tv
+        if B.get("valuation_date", "balance_sheet") == "fy_end":
+            # 美投 AMZN style: present values stated at the current fiscal year end instead of the balance-sheet date
+            shift = (1 + wacc) ** ((fy_end(self.fy) - bs).days / 365)
+            pv_stage1, pv_stage2, pv_tv = pv_stage1 * shift, pv_stage2 * shift, pv_tv * shift
+            for r in rows:
+                r["df"] *= shift; r["pv"] *= shift
         ev = pv_stage1 + pv_stage2 + pv_tv
         net_debt = self.v("debt", self.latest_key) - self.v("cash_and_st_investments", self.latest_key)
-        equity = ev - net_debt - self.v("minority_interest", self.latest_key) + self.v("investments", self.latest_key)
-        sh = self.v("diluted_shares", self.latest_key)
+        if B.get("equity_bridge", True):
+            equity = ev - net_debt - self.v("minority_interest", self.latest_key) + self.v("investments", self.latest_key)
+        else:
+            equity = ev                     # the 美投 AMZN video divides the DCF total by the share count without a net-debt bridge
+        sh = self.i["market"].get("shares_override") or self.v("diluted_shares", self.latest_key)
         fx = self.i["market"].get("fx", 1.0) * self.i["market"].get("adr_ratio", 1.0)
         per_share = equity / sh * fx
+        core_per_share = per_share
+        # sum-of-the-parts add-ons (美投's TSLA method): businesses valued at a future-year multiple, discounted to the valuation date and added per share
+        addons = []
+        val_date = fy_end(self.fy) if B.get("valuation_date", "balance_sheet") == "fy_end" else bs
+        for ad in B.get("sotp_addons", []):
+            tv_s = ad["terminal_value"]; tv_a = tv_s.get(scn, tv_s.get("base")) if isinstance(tv_s, dict) else tv_s
+            t_a = (fy_end(int(ad["year"])) - val_date).days / 365
+            pv_a = tv_a / (1 + ad["discount_rate"]) ** t_a
+            addons.append({"name": ad["name"], "year": int(ad["year"]), "discount_rate": ad["discount_rate"], "terminal_value": tv_a, "t": t_a, "pv": pv_a, "per_share": pv_a / sh * fx, "basis": ad.get("basis", "")})
+            per_share += pv_a / sh * fx
         ntm_dps = self.ntm_dps(s)
-        target = per_share * (1 + ke) - ntm_dps * fx
-        return {"rows": rows, "pv_stage1": pv_stage1, "pv_stage2": pv_stage2, "terminal_value": tv, "pv_terminal": pv_tv,
+        target = per_share * (1 + ke) - ntm_dps * fx if B.get("dcf_roll_forward", True) else per_share
+        return {"rows": rows, "pv_stage1": pv_stage1, "pv_stage2": pv_stage2, "terminal_value": tv, "pv_terminal": pv_tv, "terminal_mode": tmode,
+                "exit_pe": S.get("exit_pe") if tmode == "exit_pe" else None, "terminal_net_income": s["net_income"][self.last_explicit] if tmode == "exit_pe" else None,
                 "t_terminal": t_tv, "enterprise_value": ev, "net_debt": net_debt, "investments": self.v("investments", self.latest_key),
-                "equity_value": equity, "value_per_share": per_share, "ntm_dps": ntm_dps, "target": target,
+                "equity_value": equity, "value_per_share": per_share, "core_per_share": core_per_share, "addons": addons, "ntm_dps": ntm_dps, "target": target,
                 "terminal_share_of_ev": pv_tv / ev if ev else None,
-                "implied_exit_ev_ebitda": tv / e["ebitda"][self.years_ext[-1][0]] if e["ebitda"][self.years_ext[-1][0]] else None}
+                "implied_exit_ev_ebitda": (tv / e["ebitda"][self.years_ext[-1][0]]) if (self.years_ext and e["ebitda"][self.years_ext[-1][0]]) else None}
 
     def ntm_dps(self, s: dict) -> float:
         """Dividends per share over the next four quarters, starting with the latest reported quarter.
@@ -399,10 +442,11 @@ class Model:
             dw = self.i["blend"]["dcf_weight"]
             blended = dw * d["target"] + (1 - dw) * m["target"]
             rev25 = self.v("revenue", (self.fy - 1) * 10)
-            rev30 = e["revenue"][(self.fy + 4) * 10]
+            k30 = (self.fy + 4) * 10
+            rev30 = s["revenue"][k30] if k30 in s["revenue"] else e["revenue"].get(k30)
             out["scenarios"][scn] = {"series": s, "extrapolation": e, "dcf": d, "multiples": m, "blended_target": blended,
                                      "upside": blended / self.i["market"]["price"] - 1,
-                                     "revenue_cagr_5y": (rev30 / rev25) ** (1 / 5) - 1 if rev25 else None,
+                                     "revenue_cagr_5y": (rev30 / rev25) ** (1 / 5) - 1 if (rev25 and rev30) else None,
                                      "q5_q8_operating_margin": (m["weight_fy1"] * s["operating_income"][self.fy1] + (1 - m["weight_fy1"]) * s["operating_income"][self.fy2])
                                                                / (m["weight_fy1"] * s["revenue"][self.fy1] + (1 - m["weight_fy1"]) * s["revenue"][self.fy2])}
         p = self.i["blend"]["target_position"]
@@ -446,8 +490,7 @@ class Model:
         cols = []
         for p in self.periods:
             k = int(p["key"])
-            status = "actual" if (p["status"] == "actual" and k <= self.latest_key or (p["q"] == 0 and k < self.fy * 10)) else (
-                "forecast" if k < (self.fy + 3) * 10 else "extrapolated")
+            status = "actual" if (p["status"] == "actual" and k <= self.latest_key or (p["q"] == 0 and k < self.fy * 10)) else "forecast"
             if k == self.fy * 10:
                 status = "forecast"
             y, q = k // 10, k % 10
@@ -470,7 +513,7 @@ class Model:
             if v is not None:
                 T.setdefault(row, {})[k] = v
 
-        fc = set(self.fc_quarters + [self.fy1, self.fy2])
+        fc = set(self.fc_quarters + [self.fy1, self.fy2] + self.extra_years)
         actual_q_fy = [self.fy * 10 + k for k in range(1, self.q + 1)]
         for col in self.period_meta():
             k = col["key"]
@@ -587,14 +630,14 @@ class Model:
         S = self.i["scenarios"]
         R = self.i.get("reference_multiples", {})
         c = []
-        g_max = max(v["terminal_growth"] for v in S.values())
+        g_max = max(S[k]["terminal_growth"] for k in SCENARIOS)   # S may carry a _note key
         c.append({"check": "WACC above terminal growth", "value": w - g_max, "ok": w - g_max > 0})
         r = out.get("returns", {})
         if r.get("incremental_roic") is not None:
             c.append({"check": "Realised 2-year incremental ROIC at or above the base steady-state ROIC", "value": [r["incremental_roic"], r["steady_roic_base"]],
                       "ok": r["incremental_roic"] >= r["steady_roic_base"], "warn_only": True})
-        c.append({"check": "Steady-state ROIC at or above WACC (all scenarios)", "value": min(v["steady_roic"] for v in S.values()) - w,
-                  "ok": min(v["steady_roic"] for v in S.values()) >= w})
+        c.append({"check": "Steady-state ROIC at or above WACC (all scenarios)", "value": min(S[k]["steady_roic"] for k in SCENARIOS) - w,
+                  "ok": min(S[k]["steady_roic"] for k in SCENARIOS) >= w})
         t = [out["scenarios"][k]["blended_target"] for k in SCENARIOS]
         c.append({"check": "Scenario order bear <= base <= bull", "value": t, "ok": t[0] <= t[1] + 0.01 <= t[2] + 0.02})
         tv = out["scenarios"]["base"]["dcf"]["terminal_share_of_ev"]
@@ -603,9 +646,10 @@ class Model:
             m = S["base"]["target_multiple"]
             c.append({"check": "Base target multiple inside own 5-year forward range", "value": m,
                       "ok": R["pe5y_low"] <= m <= R["pe5y_high"], "warn_only": True})
-        irr = [v for v in out["scenarios"]["base"]["extrapolation"]["implied_return_on_new_investment"].values() if v is not None]
-        c.append({"check": "Implied return on new investment >= WACC in every transition year (base)",
-                  "value": min(irr) if irr else None, "ok": bool(irr) and min(irr) >= w, "warn_only": True})
+        irr = [v for v in out["scenarios"]["base"]["extrapolation"]["implied_return_on_new_investment"].values() if v is not None] if self.years_ext else []
+        if irr:
+            c.append({"check": "Implied return on new investment >= WACC in every transition year (base)",
+                      "value": min(irr), "ok": min(irr) >= w, "warn_only": True})
         for scn in SCENARIOS:
             e = out["scenarios"][scn]["extrapolation"]
             r0, r_ss = e["reinvest_ratio_start"], e["reinvest_ratio_steady"]   # FY+2 consensus vs steady state
