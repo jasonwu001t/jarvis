@@ -26,7 +26,9 @@ inputs.json: auto checks on the lines of the latest filed quarter, or manual sta
 flagged Review when a due date passes), **what changed since the last run** (price, house target
 split into market inputs (10-year, beta) versus model inputs, claim status changes, new quarters,
 exposure), **assumption impact** (a tornado: house target at each assumption's low and high setting,
-and the single-assumption break-even that puts the house target at the price) and the **history**
+and the single-assumption break-even that puts the house target at the price; beta, the ten-year and
+terminal growth are searched only where WACC stays 1pp above every scenario's terminal growth, so a pole at
+WACC = g is never printed as a break-even) and the **history**
 (target band against the price across runs). After a print, update the manual claims' evidence and
 dates alongside the consensus block; the auto claims re-score themselves. AMD is the first instance.
 An auto claim that misses its threshold scores Watch inside the near-miss band (`tolerance` × the threshold)

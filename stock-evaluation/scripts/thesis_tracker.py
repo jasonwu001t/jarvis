@@ -128,6 +128,7 @@ def _solve(f, target: float, lo: float, hi: float, n: int = 36):
     flo, fhi = f(lo) - target, f(hi) - target
     if flo * fhi > 0:
         return None
+    worst = max(abs(flo), abs(fhi))
     for _ in range(n):
         mid = (lo + hi) / 2
         fm = f(mid) - target
@@ -135,7 +136,10 @@ def _solve(f, target: float, lo: float, hi: float, n: int = 36):
             hi, fhi = mid, fm
         else:
             lo, flo = mid, fm
-    return (lo + hi) / 2
+    x = (lo + hi) / 2
+    # a sign change through a pole (the Gordon value at WACC = g) converges further from the target than either end
+    # of the bracket: that is no break-even (audit #96)
+    return None if abs(f(x) - target) > worst else x
 
 
 def assumption_impact(inp: dict, price: float, steps: dict = None) -> list:
@@ -150,15 +154,27 @@ def assumption_impact(inp: dict, price: float, steps: dict = None) -> list:
     def house_at(name, x):
         return _targets(_perturb(inp, name, x))["house"]
 
+    # the Gordon value (1 - g/ROIC)/(WACC - g) flips sign at WACC = g in any scenario: keep every bracket 1pp above the
+    # highest terminal growth, or the solve finds the pole, not a break-even (audit #96)
+    g_max = max(S[k]["terminal_growth"] for k in SCN)
+    gordon = inp["blend"].get("terminal_mode", "gordon") != "exit_pe"
+
+    def above_g(name, lo, hi):
+        """lo raised to where WACC clears g_max + 1pp (WACC is linear in beta and in the ten-year)."""
+        w_lo, w_hi = (mm.Model(_perturb(inp, name, x)).wacc()["wacc"] for x in (lo, hi))
+        if not gordon or w_lo >= g_max + 0.01 or w_hi <= w_lo:
+            return lo, hi
+        return lo + (g_max + 0.01 - w_lo) * (hi - lo) / (w_hi - w_lo), hi
+
     spec = [
         ("growth_pp", "Revenue growth, every forecast period", lambda x: f"{x * 100:+.0f}pp", st["growth_pp"], (-0.30, 0.30), lambda v: f"{v * 100:+.1f}pp vs the street"),
         ("margin_pp", "Operating margin, every forecast period", lambda x: f"{x * 100:+.0f}pp", st["margin_pp"], (-0.25, 0.25), lambda v: f"{v * 100:+.1f}pp vs the street"),
         ("steady_margin", "Steady-state operating margin", lambda x: f"{x * 100:+.0f}pp", st["steady_margin"], (0.03 - S["base"]["steady_margin"], 0.70 - S["base"]["steady_margin"]), lambda v: pc(S["base"]["steady_margin"] + v, 1) + " (base)"),
         ("steady_roic", "Steady-state ROIC", lambda x: f"{x * 100:+.0f}pp", st["steady_roic"], (-S["base"]["steady_roic"] + 0.06, 1.5), lambda v: pc(S["base"]["steady_roic"] + v, 1) + " (base)"),
         ("multiple_rel", "Target multiple (and exit P/E)", lambda x: f"{x * 100:+.0f}%", st["multiple_rel"], (-0.9, 3.0), lambda v: f"{S['base']['target_multiple'] * (1 + v):.1f}x (base)"),
-        ("terminal_growth", "Terminal growth", lambda x: f"{x * 100:+.1f}pp", st["terminal_growth"], (-S["base"]["terminal_growth"] + 0.001, min(0.06, base["wacc"] - S["base"]["terminal_growth"] - 0.01)), lambda v: pc(S["base"]["terminal_growth"] + v, 1)),
-        ("beta", "WACC (manual)" if manual_wacc else "Beta (cost of equity)", (lambda x: f"{x * 100:+.1f}pp") if manual_wacc else (lambda x: f"{x:+.2f}"), st["wacc_pp"] / DEFAULT_STEPS["wacc_pp"] * DEFAULT_STEPS["beta"] if manual_wacc else st["beta"], (-1.2, 3.0), (lambda v: pc(W.get("value", 0) + v * DEFAULT_STEPS["wacc_pp"] / DEFAULT_STEPS["beta"], 2)) if manual_wacc else (lambda v: f"β {W['beta'] + v:.2f}")),
-        ("risk_free", "Ten-year yield (rate-aware multiple too)", lambda x: f"{x * 100:+.2f}pp", st["risk_free"], (-0.04, 0.06), lambda v: pc(W["risk_free"] + v, 2)),
+        ("terminal_growth", "Terminal growth", lambda x: f"{x * 100:+.1f}pp", st["terminal_growth"], (-S["base"]["terminal_growth"] + 0.001, min(0.06, base["wacc"] - g_max - 0.01)), lambda v: pc(S["base"]["terminal_growth"] + v, 1)),
+        ("beta", "WACC (manual)" if manual_wacc else "Beta (cost of equity)", (lambda x: f"{x * 100:+.1f}pp") if manual_wacc else (lambda x: f"{x:+.2f}"), st["wacc_pp"] / DEFAULT_STEPS["wacc_pp"] * DEFAULT_STEPS["beta"] if manual_wacc else st["beta"], above_g("beta", -1.2, 3.0), (lambda v: pc(W.get("value", 0) + v * DEFAULT_STEPS["wacc_pp"] / DEFAULT_STEPS["beta"], 2)) if manual_wacc else (lambda v: f"β {W['beta'] + v:.2f}")),
+        ("risk_free", "Ten-year yield (rate-aware multiple too)", lambda x: f"{x * 100:+.2f}pp", st["risk_free"], above_g("risk_free", -0.04, 0.06), lambda v: pc(W["risk_free"] + v, 2)),
         ("dilution", "Share count", lambda x: f"{x * 100:+.0f}%", st["dilution"], (0.0, 2.0), lambda v: f"{v * 100:+.0f}% shares"),
     ]
     for name, label, fmt, step, (lo, hi), be_fmt in spec:

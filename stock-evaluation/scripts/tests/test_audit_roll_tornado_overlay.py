@@ -1,5 +1,5 @@
-"""Faults of the 2026-10-26 bug audit in rolling a quarter (#88), on synthetic companies. Run with
-`python3 -B -m unittest discover -s scripts/tests` from the skill root."""
+"""Faults of the 2026-10-26 bug audit in rolling a quarter and the tornado's break-evens (#88, #96), on synthetic
+companies. Run with `python3 -B -m unittest discover -s scripts/tests` from the skill root."""
 import contextlib
 import io
 import json
@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _synth  # noqa: E402
 import monitor  # noqa: E402
+import thesis_tracker as tt  # noqa: E402
 import valuation_engine as mm  # noqa: E402
 
 
@@ -106,6 +107,47 @@ class MonitorWritesOnlyARunnableRoll(unittest.TestCase):
         self.assertEqual((saved["as_of"]["latest_reported_fy"], saved["as_of"]["latest_reported_q"]), (2026, 4))
         self.assertNotIn("20271", saved["lines"]["revenue"])
         self.assertIn("inputs.json left as it was", report)
+
+
+class TornadoBracketsAboveTerminalGrowth(unittest.TestCase):
+    """#96: the beta and ten-year break-evens were bracketed across WACC <= terminal growth, where the Gordon value flips
+    sign: a low-beta name read 'not reachable' although a break-even lay in range, or printed the pole (WACC = g)."""
+
+    def setUp(self):
+        self.inp = _synth.engine_inputs()
+        self.inp["wacc"]["beta"] = 0.529                                        # a low beta (MCD's), terminal growth 3%
+        for s in self.inp["scenarios"].values():
+            s["terminal_growth"] = 0.03
+
+    def house(self, name, x):
+        return tt._targets(tt._perturb(self.inp, name, x))["house"]
+
+    def test_a_break_even_in_range_is_found(self):
+        price = tt._targets(self.inp)["house"] * 0.8
+        rows = {r["name"]: r for r in tt.assumption_impact(self.inp, price)}
+        for name in ("beta", "risk_free"):
+            be = rows[name]["break_even"]
+            self.assertIsNotNone(be, name)
+            self.assertGreater(be, 0, name)
+            self.assertAlmostEqual(self.house(name, be), price, delta=0.005 * price)
+
+    def test_no_break_even_is_not_reachable_rather_than_the_pole(self):
+        rows = {r["name"]: r for r in tt.assumption_impact(self.inp, 150.0)}
+        for name in ("beta", "risk_free"):
+            self.assertIsNone(rows[name]["break_even"], rows[name]["break_even_label"])
+            self.assertEqual(rows[name]["break_even_label"], "not reachable in the solve range")
+
+    def test_terminal_growth_stays_below_wacc_in_every_scenario(self):
+        self.inp["scenarios"]["bull"]["terminal_growth"] = 0.05                 # 2pp above the base case's
+        self.inp["blend"]["target_position"] = 0.5
+        rows = {r["name"]: r for r in tt.assumption_impact(self.inp, 600.0)}
+        be = rows["terminal_growth"]["break_even"]
+        self.assertIsNotNone(be)
+        self.assertAlmostEqual(self.house("terminal_growth", be), 600.0, delta=3.0)
+
+    def test_solve_rejects_a_pole(self):
+        self.assertIsNone(tt._solve(lambda x: 1 / x, 0.5, -1.0, 1.5))           # the only sign change is the pole at 0
+        self.assertAlmostEqual(tt._solve(lambda x: 1 / x, 0.5, 1.0, 3.0), 2.0, places=6)
 
 
 if __name__ == "__main__":
