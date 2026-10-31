@@ -23,11 +23,14 @@ model-year columns are colour-coded and annual columns bold. Charts are Plotly (
    balance sheet, non-GAAP and ROIC) for the actual and explicit periods, then the transition years,
    under a bear / base / bull toggle. The segment rows come from the folder's `segments` block
    (`report_html.row_specs`): revenue and growth per segment, children indented under their parent,
-   operating income and margin for every segment with an `oi_line`.
+   operating income and margin for every segment with an `oi_line`. The tables are built from the engine's
+   own series and steady state (`out["effective_scenarios"]`), so with the ROIC anchor binding they match
+   the DCF the report states.
 4. **Valuation.** The shared WACC table; for the selected scenario the discounted-cash-flow table,
    the bridge (EV → equity → per share → 12 months forward → target), the P/E leg and the blend.
 5. **Sensitivities.** Base DCF on steady ROIC × margin; P/E target on multiple × scenario EPS; the
-   risk-free rate. *Why:* these are the judgement calls; the reader must see what each is worth.
+   risk-free rate. Every grid holds the steady state the engine ran on (the anchored ROIC when the anchor
+   binds). *Why:* these are the judgement calls; the reader must see what each is worth.
 6. **Assumptions and adjustments.** Settings, scenario parameters, the adjustment table, the house
    view paragraph (`thesis.summary`) and rating.
 7. **Monitor.** Position rules (fired ones highlighted), live inputs with their dates, the check

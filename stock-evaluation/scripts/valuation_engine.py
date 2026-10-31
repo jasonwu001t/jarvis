@@ -411,8 +411,11 @@ class Model:
         anchored = min(base0, max(floor, r["incremental_roic"]))
         delta = anchored - base0
         for k in SCENARIOS:
-            self.i["scenarios"][k]["steady_roic"] = max(floor, self.i["scenarios"][k]["steady_roic"] + delta)
-        return {"template_base": base0, "anchored_base": anchored, "delta": delta, "floor": floor, "incremental_roic": r["incremental_roic"]}
+            # the floor only stops the downward shift: a scenario already below it keeps its own value (audit #254)
+            roic = self.i["scenarios"][k]["steady_roic"]
+            self.i["scenarios"][k]["steady_roic"] = max(min(roic, floor), roic + delta)
+        return {"template_base": base0, "anchored_base": self.i["scenarios"]["base"]["steady_roic"], "delta": delta, "floor": floor,
+                "incremental_roic": r["incremental_roic"]}
 
     # ------------------------------------------------------------ reverse DCF
     def _solve(self, lo: float, hi: float, f, target: float, n: int = 40):
@@ -463,6 +466,7 @@ class Model:
         anchor = self.anchor_roic(w)
         out = {"inputs_as_of": self.i["as_of"], "price": self.i["market"]["price"], "wacc": w, "scenarios": {},
                "returns": {**self.incremental_roic(), "steady_roic_base": self.i["scenarios"]["base"]["steady_roic"], "anchor": anchor},
+               "effective_scenarios": copy.deepcopy(self.i["scenarios"]),   # what the run used (anchored ROIC): the report reads it (audit #189)
                "warnings": []}
         if w["cost_of_debt_source"] != "inputs":
             out["warnings"].append(f"No pretax cost of debt in inputs.json: the WACC uses {w['pretax_cost_of_debt']:.2%} = {w['cost_of_debt_source']}")

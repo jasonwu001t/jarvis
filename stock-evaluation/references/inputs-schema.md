@@ -39,7 +39,7 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
             "sotp_addons": [],                              // 美投 TSLA: [{name, year, discount_rate, terminal_value: {bear, base, bull}, basis}]
             "sizing": {"full_at_reward_to_risk": 2.0, "neutral": 0.5},            // expected-value exposure (valuation-method.md)
             "multiple_rate_aware": {"enabled": true, "rf_ref": 0.05},             // m x (rf_ref + ERP)/(rf + ERP)
-            "steady_roic_anchor": {"enabled": true, "years": 2, "floor_over_wacc": 0.02},
+            "steady_roic_anchor": {"enabled": true, "years": 2, "floor_over_wacc": 0.02},   // the floor only stops the downward shift
             "overlays": {"enabled": true, "regime": {"nfci_max": 0.0, "vix_max": 30, "baa10y_max": 0.025, "cap": 0.5},
                          "vol": {"target": 0.35, "window": 60, "floor": 0.25}, "trend": {"sma": 200, "max_step_below": 0.25}}},
   // scenarios also carry "probability" (bear/base/bull, normalised); monitor carries "position_source" (expected_value | rules)

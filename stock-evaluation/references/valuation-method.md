@@ -138,7 +138,10 @@ Far less sensitive to terminal assumptions than the target itself; monitor it qu
 ΔNOPAT (TTM now versus TTM `years` ago) over the net reinvestment of those years (capex + leases − D&A
 + ΔWC), reported quarters only. With the anchor enabled the base steady-state ROIC is pulled down to
 it when it is lower (floored at WACC + `floor_over_wacc`), and bear and bull shift by the same amount;
-a check warns whenever realised sits below the assumed steady state.
+the floor only stops that downward shift, so a scenario already below it keeps the value it was given.
+`out["effective_scenarios"]` (and `returns.anchor.anchored_base`) hold the ROICs the run used, and the
+report's tables, labels and sensitivities read them. A check warns whenever realised sits below the assumed
+steady state.
 
 ## Checks (fail = an input is wrong)
 

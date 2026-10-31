@@ -234,13 +234,16 @@ def wacc_table(w: dict, inputs: dict) -> str:
 
 
 # ----------------------------------------------------------------------------------------- sensitivities
-def sensitivities(inputs: dict) -> dict:
+def sensitivities(inputs: dict, out: dict = None) -> dict:
     base_in = copy.deepcopy(inputs)
     exit_pe = base_in["blend"].get("terminal_mode") == "exit_pe"
     manual_wacc = base_in["wacc"].get("mode") == "manual"
     m0 = mm.Model(base_in)
     y1k, y2k = m0.fy1, m0.fy2
-    out = mm.Model(base_in).run()
+    out = out or mm.Model(base_in).run()
+    # every grid holds the steady state the engine ran on (the anchored ROIC) and sets its own values (audit #189)
+    base_in["scenarios"] = copy.deepcopy(out.get("effective_scenarios", base_in["scenarios"]))
+    base_in["blend"]["steady_roic_anchor"] = {"enabled": False}
     w0 = out["wacc"]["wacc"]
     if exit_pe:
         # the two subjective terminal inputs of the exit-multiple method: the exit P/E and the discount rate
@@ -355,7 +358,7 @@ def position_section(inputs: dict, out: dict, live: dict) -> str:
     ex, im, rt = out.get("expected") or {}, out.get("implied") or {}, out.get("returns") or {}
     P = live.get("position") or {}
     st, rs = P.get("state"), P.get("result")
-    S = inputs["scenarios"]
+    S = out.get("effective_scenarios", inputs["scenarios"])   # the steady state the engine used (audit #189)
     bm = out["scenarios"]["base"]["multiples"]
     rows = []
     if ex:
@@ -463,7 +466,7 @@ def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str
 def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, applied_notes: list[str], rules_eval: list[dict], folder: str = None) -> str:
     model = mm.Model(inputs)
     a, s, h, w = inputs["as_of"], out["scenarios"], out["house"], out["wacc"]
-    S = inputs["scenarios"]
+    S = out.get("effective_scenarios", inputs["scenarios"])   # the steady state the engine used (anchored ROIC, audit #189)
     price = out["price"]
     base_tpl = inputs.get("baseline", {})
     bl_label = base_tpl.get("label", "Baseline")
@@ -475,8 +478,8 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     today = dt.date.today().isoformat()
     price_date = live.get("price", {}).get("date", inputs["market"].get("price_date"))
     cols = model.period_meta()
-    tables = {k: model.table(k) for k in SCN}
-    sn = sensitivities(inputs)
+    tables = {k: model.table(k, s[k]["series"], s[k]["extrapolation"]) for k in SCN}   # the engine's own series (audit #189)
+    sn = sensitivities(inputs, out)
     fired = [r for r in rules_eval if r["fired"]]
     e = live.get("earnings") or {}
     b = live.get("beta") or {}
