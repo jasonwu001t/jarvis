@@ -227,12 +227,14 @@ def main(argv: list[str]) -> int:
     seg_src = None
     if "--no-atlas-segments" not in argv:
         try:
-            S = atlas_data.segments(ticker)
+            S = atlas_data.segments(ticker, axis=inp.get("segment_axis"))
             if S["defs"]:
                 seg_defs, seg_src = S["defs"], S["source"]
                 for line, vals in S["lines"].items():
                     L[line] = {k: v for k, v in vals.items() if k // 10 >= since_fy - 1}
-                notes.append(f"segments from {seg_src}: {list(seg_defs)} (members seen: {S['members_all']})")
+                others = sorted(a for a in S.get("axes") or {} if a != S.get("axis"))
+                notes.append(f"segments from {seg_src}: {list(seg_defs)} (members seen: {S['members_all']})"
+                             + (f"; other axes, not summed: {others}" if others else ""))
         except atlas_data.NotCollected as exc:
             notes.append(f"atlas has no segment facts for {ticker} ({exc}); falling back")
     if not seg_defs and os.path.exists(os.path.join(folder, "segments.py")):
@@ -278,6 +280,11 @@ def main(argv: list[str]) -> int:
                 for y in range(since_fy, fy + 1):
                     if all((y * 10 + i) in d for i in range(1, 5)):
                         d[y * 10] = sum(d[y * 10 + i] for i in range(1, 5))
+    top = [name for name in seg_defs if not (seg_defs[name] or {}).get("parent")]
+    if top and all(latest in L.get(f"seg:{n}", {}) for n in top) and L["revenue"].get(latest):
+        share = sum(L[f"seg:{n}"][latest] for n in top) / L["revenue"][latest]
+        if abs(share - 1) > 0.02:      # audit #142: a wrong axis or a missing member; the street keeps the share
+            notes.append(f"WARNING: segments {top} sum to {share:.0%} of revenue in {latest}: they do not add up to the total")
     # ---- the street
     last4, prev4 = qkeys[-4:], qkeys[-8:-4]
     ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)      # revenue: the quarters are revenue's own
@@ -355,7 +362,6 @@ def main(argv: list[str]) -> int:
     # names no oi_line: its members keep theirs where they have operating-income values.
     with_oi = [name for name in seg_defs if (seg_defs[name] or {}).get("oi_line", f"segoi:{name}") is not None and L.get(f"segoi:{name}")]
     seg_m = {name: ratio(f"segoi:{name}", f"seg:{name}") for name in with_oi}
-    top = [name for name in seg_defs if not (seg_defs[name] or {}).get("parent")]
 
     def reconcile(raw, total):
         """Scale a street period's segment forecasts so the top-level ones add up to `total` times the share of revenue

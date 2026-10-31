@@ -3,7 +3,8 @@
   fundamentals(ticker)   /research/fundamentals/{t}?currency=USD   KPI series per fiscal period, USD millions; IFRS filers
                          converted at atlas's FX; per-share values x per_share_divisor (ADR ratio), shares / divisor
   segments(ticker)       /research/fundamentals/{t}/segments        revenue and operating income per business segment
-                         (sec.segment_facts, XBRL dimensions); members with revenue in the latest four quarters
+                         (sec.segment_facts, XBRL dimensions; a 6-K filer's split from sec.foreign_quarterly_statements,
+                         one axis of it); members with revenue in the latest four quarters
   guidance_releases(t)   sec.earnings_guidance rows per release     next-quarter revenue / operating income, full-year
                          capex / expenses, in the shape guidance.py's collect() returns (beat-adjustment needs history)
   events(ticker)         /filings/ticker/{t}/events                 material 8-K items and 6-Ks with headlines
@@ -88,12 +89,26 @@ def fundamentals(ticker: str, currency: str = "USD") -> dict:
             "currency": d.get("currency", currency), "native_unit": d.get("native_unit")}
 
 
-def segments(ticker: str, recent_quarters: int = 4) -> dict:
+AXIS_PREFERENCE = ("platform", "product")     # a 6-K filer's business lines; geography and technology cut the same revenue
+
+
+def segments(ticker: str, recent_quarters: int = 4, axis: str = None) -> dict:
     """{'defs': {name: {parent: None, oi_line: 'segoi:<name>' | None}}, 'lines': {'seg:<name>': {key: musd}, 'segoi:<name>': {...}},
-    'axis', 'members_all'}. A member counts when it has revenue in the latest `recent_quarters` quarters the company reported
-    (the current reporting structure); older or operating-income-only members are listed in members_all only."""
+    'axis', 'axes', 'members_all', 'latest_keys', 'source'}. A member counts when it has revenue in the latest
+    `recent_quarters` quarters its axis reported (the current reporting structure); older or operating-income-only members
+    are listed in members_all only. A US filer's members (sec.segment_facts) carry no axis: its one business-segment axis.
+    A foreign filer's 6-K members (sec.foreign_quarterly_statements) come on several axes that each cut the same revenue
+    (geography, platform, product, technology): one becomes the business lines (`axis`, else platform, else product, else
+    any but geography and technology), never their union, so a name on two axes ('Others') cannot overwrite the other
+    (audit #142); `axes` lists every axis's members. A name repeated within the axis is told apart by its member_key."""
     d = get(f"/api/v1/research/fundamentals/{ticker}/segments")["data"]
-    members = d.get("segments", [])
+    by_axis = {}
+    for m in d.get("segments", []):
+        by_axis.setdefault(m.get("axis"), []).append(m)
+    if axis is None:
+        named = sorted(a for a in by_axis if a)
+        axis = next((a for a in AXIS_PREFERENCE if a in by_axis), None) or next((a for a in named if a not in ("geography", "technology")), None)
+    members = by_axis.get(axis, [])
     latest_keys = sorted({r["fiscal_year"] * 10 + int(r["fiscal_period"][1]) for m in members
                           for r in m["revenue"]["quarterly"] if r.get("fiscal_period", "").startswith("Q")})[-recent_quarters:]
     defs, lines = {}, {}
@@ -101,7 +116,7 @@ def segments(ticker: str, recent_quarters: int = 4) -> dict:
         rq = {r["fiscal_year"] * 10 + int(r["fiscal_period"][1]): r["value"] for r in m["revenue"]["quarterly"] if r.get("fiscal_period", "").startswith("Q") and r.get("value") is not None}
         if not latest_keys or not all(k in rq for k in latest_keys):
             continue
-        name = m["member"]
+        name = m["member"] if m["member"] not in defs else f"{m['member']} ({m.get('member_key')})"
         for r in m["revenue"]["annual"]:
             if r.get("value") is not None:
                 rq[r["fiscal_year"] * 10] = r["value"]
@@ -116,8 +131,9 @@ def segments(ticker: str, recent_quarters: int = 4) -> dict:
         if oi:
             lines[f"segoi:{name}"] = {k: v / 1e6 for k, v in oi.items()}
         defs[name] = {"parent": None, "oi_line": f"segoi:{name}" if oi else None}
-    return {"defs": defs, "lines": lines, "axis": d.get("axis"), "members_all": [m["member"] for m in members],
-            "latest_keys": latest_keys, "source": "sec.segment_facts via atlas"}
+    return {"defs": defs, "lines": lines, "axis": axis if axis is not None else d.get("axis"), "members_all": [m["member"] for m in members],
+            "axes": {a: [m["member"] for m in ms] for a, ms in by_axis.items() if a}, "latest_keys": latest_keys,
+            "source": f"{d.get('source') or 'sec.segment_facts'} via atlas" + (f", {axis} axis" if axis else "")}
 
 
 def _musd(v, unit):

@@ -205,5 +205,75 @@ class StreetSegmentsAddUp(FillCase):
             self.assertAlmostEqual(L["seg:Alpha"][k] + L["seg:Beta"][k], 0.8 * L["revenue"][k], places=6, msg=k)
 
 
+def _member(name, axis, per_q, key=None):
+    quarters = [{"fiscal_year": y, "fiscal_period": f"Q{i}", "value": per_q * 1e6}
+                for y in (2025, 2026) for i in (1, 2, 3, 4) if (y, i) <= (2026, 2)]
+    m = {"member": name, "member_key": key or name.lower(), "revenue": {"quarterly": quarters, "annual": []},
+         "operating_income": {"quarterly": [], "annual": []}}
+    if axis:
+        m["axis"] = axis
+    return m
+
+
+class SegmentAxes(unittest.TestCase):
+    """#142: a 6-K filer's members come on several axes (geography, platform, product, technology); segments() made
+    every one a business line keyed by the bare name, so 'Others' held whichever axis came last (TSM: 19 'segments'
+    summing to 3.7x revenue)."""
+
+    def setUp(self):
+        self.saved = atlas_data.get
+
+    def tearDown(self):
+        atlas_data.get = self.saved
+
+    def serve(self, members, axis="statements note"):
+        atlas_data.get = lambda path, **kw: {"data": {"axis": axis, "segments": members, "source": "sec.foreign_quarterly_statements"}}
+
+    def six_k(self):
+        return [_member("Taiwan", "geography", 60.0), _member("Others", "geography", 40.0),
+                _member("HPC", "platform", 70.0), _member("Others", "platform", 30.0),
+                _member("3nm", "technology", 50.0), _member("5nm", "technology", 30.0)]
+
+    def test_one_axis_becomes_the_business_lines(self):
+        self.serve(self.six_k())
+        S = atlas_data.segments("ZZZ")
+        self.assertEqual(S["axis"], "platform")
+        self.assertEqual(sorted(S["defs"]), ["HPC", "Others"])
+        self.assertEqual(S["lines"]["seg:Others"][20262], 30.0)
+        self.assertEqual(sum(S["lines"][f"seg:{n}"][20262] for n in S["defs"]), 100.0)
+        self.assertIn("platform", S["source"])
+        self.assertEqual(sorted(S["axes"]), ["geography", "platform", "technology"])
+
+    def test_the_caller_picks_another_axis(self):
+        self.serve(self.six_k())
+        S = atlas_data.segments("ZZZ", axis="geography")
+        self.assertEqual(sorted(S["defs"]), ["Others", "Taiwan"])
+        self.assertEqual(S["lines"]["seg:Others"][20262], 40.0)
+
+    def test_a_us_filer_keeps_its_single_axis(self):
+        self.serve([_member("Cloud", None, 60.0), _member("Devices", None, 40.0)], axis="us-gaap:StatementBusinessSegmentsAxis")
+        S = atlas_data.segments("ZZZ")
+        self.assertEqual(sorted(S["defs"]), ["Cloud", "Devices"])
+        self.assertEqual(S["axis"], "us-gaap:StatementBusinessSegmentsAxis")
+
+    def test_a_repeated_name_on_one_axis_does_not_overwrite(self):
+        self.serve([_member("Other", None, 60.0, key="other_a"), _member("Other", None, 40.0, key="other_b")])
+        S = atlas_data.segments("ZZZ")
+        self.assertEqual(len(S["defs"]), 2)
+        self.assertEqual(sum(S["lines"][f"seg:{n}"][20262] for n in S["defs"]), 100.0)
+
+
+class SegmentSumCheck(FillCase):
+    """#142: the fill says which axis it used and warns when the segment lines do not add up to revenue."""
+
+    def test_the_fill_names_the_axis_and_warns_on_a_short_sum(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        segs = {**_segments(world, {"Alpha": 0.5, "Beta": 0.2}), "axis": "platform",
+                "source": "sec.foreign_quarterly_statements via atlas, platform axis"}
+        inp = self.fill(world, segments=segs)
+        self.assertIn("platform", inp["_sources"]["segments"])
+        self.assertTrue(_warned(inp, "segments", "70"))
+
+
 if __name__ == "__main__":
     unittest.main()
