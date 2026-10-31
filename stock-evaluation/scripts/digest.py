@@ -27,7 +27,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from thesis_tracker import CSS, STATUS_LABEL, esc, pc, usd  # noqa: E402
+from thesis_tracker import CSS, STATUS_LABEL, esc, normalise_status, pc, usd  # noqa: E402
 
 BOOK_SLOTS = 10
 TARGET_MOVE = 0.01          # house-target move that counts as "moved"
@@ -125,7 +125,7 @@ def folders_under(root: str) -> list:
 def claim_counts(rec: dict) -> dict:
     counts = {k: 0 for k in ("on_track", "watch", "broken", "review", "pending")}
     for st in (rec.get("claims") or {}).values():
-        counts[st if st in counts else "pending"] += 1
+        counts[normalise_status(st)[0]] += 1          # 'fail' recorded before the fix is broken (audit #98)
     return counts
 
 
