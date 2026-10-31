@@ -115,7 +115,10 @@ its own TTM growth; each ratio by the fill's rule, over the quarters both its li
 historical beat against its midpoint, and full-year capex range from the 8-K exhibit, put on the
 model's lease-free capex when it includes finance-lease principal, fading from there) and **foresight** (reported figures where the forecast periods have since been reported, an
 upper bound). Variants: momentum/rules, guidance/rules, guidance/EV sizing with the rate-aware multiple
-and ROIC anchor, the same plus overlays, foresight/rules. Scenario assumptions, adjustments and rules
+and ROIC anchor, the same plus overlays, foresight/rules. The overlays' regime gate reads NFCI, VIX and the
+Baa spread as FRED had published them by that day's close (atlas `?as_of`), not today's revised series: NFCI
+for a Friday comes out the next Wednesday, and VIX and the Baa spread trail by FRED's posting delay, as they
+do for the morning monitor. Scenario assumptions, adjustments and rules
 are the folder's current ones; segment adjustments become total-revenue adjustments. Outputs
 `backtest/results.json`, `report.md`, `report.html` (equity curves with the exposure shading, targets
 against the price path, quarter tables, honesty notes). Use it to test the rules and the method, not to

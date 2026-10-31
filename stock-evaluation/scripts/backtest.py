@@ -35,6 +35,7 @@ import statistics
 import sys
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import valuation_engine as mm  # noqa: E402
@@ -82,12 +83,9 @@ def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2, investmen
         K[k["id"]] = rows
     px = {t: {r["as_of_date"]: float(r["close"]) for r in get(f"/api/v1/market/prices/{t}", limit=1500)["data"]["rows"]} for t in (ticker, "SPY")}
     rf = {r["as_of_date"]: float(r["value"]) / 100 for r in get("/api/v1/macro/series/DGS10", limit=2000)["data"]["rows"]}
-    macro = {}
-    for sid, name, scale in (("NFCI", "nfci", 1.0), ("VIXCLS", "vix", 1.0), ("BAA10Y", "baa10y", 0.01)):
-        macro[name] = {r["as_of_date"]: float(r["value"]) * scale for r in get(f"/api/v1/macro/series/{sid}", limit=2000)["data"]["rows"] if r["value"] is not None}
     gsince = (dt.date.fromisoformat(since) - dt.timedelta(days=400)).isoformat()
     guidance_rows = [r for r in guid.collect(ticker, folder, since=gsince) if r.get("parsed")]
-    data = {"kpis": K, "prices": px, "rf": rf, "macro": macro, "guidance": guidance_rows}
+    data = {"kpis": K, "prices": px, "rf": rf, "guidance": guidance_rows}
     # the balance concepts point in time, once per decision date: the newest vintage atlas held then, not today's, whose
     # knowledge_time is the latest filing that repeated a value (a year-end balance looked unknown until then, audit #251)
     data["evals"] = release_evals(ticker, data, since, lag_days)
@@ -101,6 +99,18 @@ def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2, investmen
                        **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
             data["extras"][d][concept] = [{"end": e, "value": v} for e, v in balance_instants(rows)]
     return data
+
+
+def macro_as_of(d: str) -> dict:
+    """NFCI, VIX and the Baa spread as FRED had published them by the close of decision day d (atlas ?as_of): today's
+    vintage keyed by observation date gated a Monday on the Friday NFCI released the next Wednesday, at its revised value
+    (audit #257). VIX and the Baa spread trail by FRED's posting delay, as they do for the morning monitor."""
+    close = dt.datetime.combine(dt.date.fromisoformat(d), dt.time(16), ZoneInfo("America/New_York")).isoformat()
+    out = {}
+    for sid, name, scale in (("NFCI", "nfci", 1.0), ("VIXCLS", "vix", 1.0), ("BAA10Y", "baa10y", 0.01)):
+        rows = get(f"/api/v1/macro/series/{sid}", limit=30, as_of=close)["data"]["rows"]
+        out[name] = {r["as_of_date"]: float(r["value"]) * scale for r in rows if r["value"] is not None}
+    return out
 
 
 def last_on_or_before(series: dict, d: str):
@@ -330,7 +340,8 @@ def rule_fired(inputs: dict, out: dict):
 
 
 def simulate(points: list[dict], prices: dict, bench: dict, sizing: str = "rules", use_overlays: bool = False, macro: dict | None = None, cfg: dict | None = None) -> dict:
-    """Exposure set at the close of each evaluation day (release + lag trading days); cash earns nothing; price returns only."""
+    """Exposure set at the close of each evaluation day (release + lag trading days); cash earns nothing; price returns only.
+    macro: {evaluation day: macro_as_of(day)}, the overlay series as published by that day."""
     days = sorted(d for d in prices if d >= points[0]["date"])
     expo, equity, bh, spy = 1.0, 1.0, 1.0, 1.0
     first = days[0]
@@ -350,7 +361,7 @@ def simulate(points: list[dict], prices: dict, bench: dict, sizing: str = "rules
             if e is None:
                 e = expo
             if use_overlays:
-                st = overlays.market_state(prices, d, macro or {}, cfg)
+                st = overlays.market_state(prices, d, (macro or {}).get(d, {}), cfg)
                 res = overlays.apply(e, st, expo)
                 p["overlay"] = {"regime_cap": st["regime_cap"], "vol_scale": st["vol_scale"], "above_sma": st["above_sma"], "stress": st["stress"], "recommended": res["recommended"]}
                 e = round(res["recommended"], 2)
@@ -543,6 +554,7 @@ def main(argv: list[str]) -> int:
     data = fetch_all(ticker, folder, since, lag_days=lag,
                      investment_concepts=(template.get("balance_mapping") or {}).get("investment_concepts"))
     evals = data["evals"]
+    macro = {d: macro_as_of(d) for d, _ in evals}
     results = {}
     cache = {}
     for vname, (street, sizing, use_ov, improvements) in VARIANTS.items():
@@ -565,7 +577,7 @@ def main(argv: list[str]) -> int:
                         "street": inp["_street"], "price_12m": fwd_px,
                         "checks_failed": [c["check"] for c in out["checks"] if not c["ok"] and not c.get("warn_only")],
                         "q5_q8_eps": s["base"]["multiples"]["q5_q8_eps"], "pe_at_price": s["base"]["multiples"]["price_implied_multiple"]})
-        sim = simulate(pts, data["prices"][ticker], data["prices"]["SPY"], sizing, use_ov, data["macro"], template["blend"].get("overlays"))
+        sim = simulate(pts, data["prices"][ticker], data["prices"]["SPY"], sizing, use_ov, macro, template["blend"].get("overlays"))
         results[vname] = {"points": pts, "sim": sim, "street": street, "sizing": sizing, "overlays": use_ov, "improvements": improvements}
     with open(os.path.join(out_dir, "results.json"), "w", encoding="utf-8") as fh:
         json.dump({"ticker": ticker, "since": since, "generated": dt.date.today().isoformat(), "lag_days": lag, "results": results}, fh, indent=1, default=str)
