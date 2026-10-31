@@ -366,9 +366,11 @@ def position_section(inputs: dict, out: dict, live: dict) -> str:
     if P:
         rows.append(("Rules exposure (first fired rule)", pc(P["rule_exposure"], 0) if P.get("rule_exposure") is not None else "keep"))
     if st and rs:
-        rows += [("Regime gate: NFCI / VIX / Baa spread", f"{st['nfci']:+.2f} / {st['vix']:.1f} / {pc(st['baa10y'], 2)}" + (f" → <b>stress</b> ({'; '.join(st['stress'])}), cap {pc(st['regime_cap'], 0)}" if st["stress"] else " → no stress")),
+        num = lambda x, spec: "—" if x is None else format(x, spec)     # too little history: no figure (audit #258)
+        trend = {True: "above", False: "below"}.get(st["above_sma"], "n/a (fewer than 200 closes)")
+        rows += [("Regime gate: NFCI / VIX / Baa spread", f"{num(st['nfci'], '+.2f')} / {num(st['vix'], '.1f')} / {pc(st['baa10y'], 2)}" + (f" → <b>stress</b> ({'; '.join(st['stress'])}), cap {pc(st['regime_cap'], 0)}" if st["stress"] else " → no stress")),
                  ("Volatility scaling: realised 60-day vol → multiplier", f"{pc(st['realized_vol'], 0)} → {st['vol_scale']:.2f}"),
-                 ("Trend: price vs 200-day average", f"{'above' if st['above_sma'] else 'below'} ({usd(st['sma'], 0)})" + ("; increases staged" if rs["staged"] else "")),
+                 ("Trend: price vs 200-day average", f"{trend} ({usd(st['sma'], 0)})" + ("; increases staged" if rs["staged"] else "")),
                  (f"<b>Recommended exposure</b> (signal {pc(rs['signal'], 0)} → regime {pc(rs['after_regime'], 0)} → vol {pc(rs['after_vol'], 0)}; current {pc(P['current'], 0) if P.get('current') is not None else 'unknown'})", f"<b>{pc(rs['recommended'], 0)}</b>")]
     pos_tbl = "<div class='tbl'><table><tbody>" + "".join(f"<tr><td>{a}</td><td class='num'>{b}</td></tr>" for a, b in rows) + "</tbody></table></div>"
     imp = []
@@ -409,6 +411,18 @@ def position_section(inputs: dict, out: dict, live: dict) -> str:
 
 
 # ----------------------------------------------------------------------------------------- charts data
+def _r1(v):
+    return None if v is None else round(v, 1)
+
+
+def _pe_range(R: dict, sep: str = "-") -> str | None:
+    """The own five-year forward P/E range as text, or None while it is not keyed in (new_ticker writes nulls and
+    fill_from_atlas never sets them: the report rendered TypeError, audit #94)."""
+    if any(R.get(k) is None for k in ("pe5y_low", "pe5y_avg", "pe5y_high")):
+        return None
+    return f"{R['pe5y_low']:.1f}x{sep}{R['pe5y_high']:.1f}x"
+
+
 def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str:
     cols = model.period_meta()
     years = [c for c in cols if c["annual"] and c["key"] >= model.fy * 10]
@@ -435,7 +449,7 @@ def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str
                "stage": ["explicit" if c["status"] == "forecast" else "transition" for c in years]},
         "rev": {"labels": hist_labels + labels, "rev": hist_rev + rev, "margin": hist_mg + mg, "capex": hist_capex + capex,
                 "n_hist": len(hist_years)},
-        "pe": {"low": round(R["pe5y_low"], 1), "avg": round(R["pe5y_avg"], 1), "high": round(R["pe5y_high"], 1), "now": s["base"]["multiples"]["price_implied_multiple"],
+        "pe": {"low": _r1(R.get("pe5y_low")), "avg": _r1(R.get("pe5y_avg")), "high": _r1(R.get("pe5y_high")), "now": s["base"]["multiples"]["price_implied_multiple"],
                "bear": inputs["scenarios"]["bear"]["target_multiple"], "base": inputs["scenarios"]["base"]["target_multiple"], "bull": inputs["scenarios"]["bull"]["target_multiple"]},
     })
 
@@ -481,7 +495,11 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     pe_txt = (f"The base case's quarters-5-8 earnings ({usd(bm['q5_q8_eps'], 2)} a share) are negative or near zero, so its P/E leg is off and the DCF carries the whole value. "
               if bm.get("disabled") else
               f"The price pays {bm['price_implied_multiple']:.1f}x the model's quarters-5-8 EPS "
-              f"({usd(bm['q5_q8_eps'], 2)}), against {esc(co)}'s own five-year forward range of {R['pe5y_low']:.1f}x-{R['pe5y_high']:.1f}x (average {R['pe5y_avg']:.1f}x) and the {tm:.0f}x the base case assigns. ")
+              f"({usd(bm['q5_q8_eps'], 2)}), against "
+              + (f"{esc(co)}'s own five-year forward range of {_pe_range(R)} (average {R['pe5y_avg']:.1f}x) and " if _pe_range(R) else "")
+              + f"the {tm:.0f}x the base case assigns. ")
+    pe_own = (f"own five-year forward range {R['pe5y_low']:.1f}x / {R['pe5y_avg']:.1f}x / {R['pe5y_high']:.1f}x"
+              if _pe_range(R) else "no own five-year forward range on record")
     verdict = (f"At {usd(price, 2)} the stock trades {where}. {pe_txt}"
                f"House 12-month target {usd(h['target'])} ({pc(h['upside'], 1, True)}); rule in force: <b>{esc(fired[0]['name']) if fired else 'none'}</b>.")
 
@@ -559,18 +577,29 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         narrative = "".join(article(t, body) for t, body in mod.sections(ctx))
         narrative_title = getattr(mod, "TITLE", narrative_title)
         narrative_sub = getattr(mod, "SUBTITLE", "")
+    if model.years_ext:
+        timeline_tail = (f"<div><span>FY{y2 // 10 + 1} – FY{model.years_ext[-1][0] // 10}</span><b>Transition ({model.n_conv} years)</b>"
+                         f"<small>Every driver glides linearly to the steady state.</small></div>\n"
+                         f"<div><span>After FY{model.years_ext[-1][0] // 10}</span><b>Perpetual</b><small>Terminal growth "
+                         f"{pc(S['base']['terminal_growth'])}, steady ROIC {pc(S['base']['steady_roic'], 0)}.</small></div>")
+    elif bs["dcf"].get("terminal_mode") == "exit_pe":
+        # No transition years (convergence_years 0): the explicit period ends in an exit multiple (audit #252).
+        timeline_tail = (f"<div><span>At FY{model.last_explicit // 10}</span><b>Terminal value</b><small>Terminal-year net income × "
+                         f"the exit P/E ({bs['dcf']['exit_pe']:.0f}x).</small></div>")
+    else:
+        timeline_tail = (f"<div><span>After FY{model.last_explicit // 10}</span><b>Perpetual</b><small>Terminal growth "
+                         f"{pc(S['base']['terminal_growth'])}, steady ROIC {pc(S['base']['steady_roic'], 0)}.</small></div>")
     if narrative is None:
         narrative_sub = "A generic walkthrough of the method with this ticker's numbers; add narrative.py to the ticker folder for the company-specific argument."
         narrative = "".join([
             article("1. How the DCF works", f"""<p>A company is worth the cash it will generate, discounted because future dollars are worth less than today's. The cash in question is <b>unlevered free cash flow</b>: operating profit after tax, plus depreciation, minus the reinvestment needed to keep growing (capex, leases, working capital).</p>
 <p>FY{y1 // 10} in the base case: NOPAT {bn(nopat27)} + D&A {bn(da27)} − capex {bn(capex27)} + working capital and other {bn(-wc27)} = <b>FCFF {bn(fcff27)}</b>. Consensus is the starting point; the house adjustments are layered on top (see the assumptions section).</p>"""),
-            article("2. Three periods", f"""<div class='timeline'><div><span>FY{fy} H2 – FY{y2 // 10}</span><b>Explicit period</b><small>Consensus plus house uplifts.</small></div>
-<div><span>FY{y2 // 10 + 1} – FY{model.years_ext[-1][0] // 10}</span><b>Transition ({model.n_conv} years)</b><small>Every driver glides linearly to the steady state.</small></div>
-<div><span>After FY{model.years_ext[-1][0] // 10}</span><b>Perpetual</b><small>Terminal growth {pc(S['base']['terminal_growth'])}, steady ROIC {pc(S['base']['steady_roic'], 0)}.</small></div></div>
+            article("2. Three periods" if model.years_ext else "2. Two periods", f"""<div class='timeline'><div><span>FY{fy} H2 – FY{(y2 if model.years_ext else model.last_explicit) // 10}</span><b>Explicit period</b><small>Consensus plus house uplifts.</small></div>
+{timeline_tail}</div>
 <p>Historical ROIC in this model's measure: {', '.join(f'{l} {pc(v, 0)}' for l, v in roic_hist) or 'n/a'}. FCFF turns positive in <b>{first_pos}</b>.</p><div id='c_fc' class='chart tall'></div>"""),
             article("3. Discount rate and the bridge to a target", f"""<p>WACC <b>{pc(w['wacc'], 2)}</b>: risk-free {pc(inputs['wacc']['risk_free'], 2)}, ERP {pc(inputs['wacc']['erp'])}, beta {inputs['wacc']['beta']:.2f}.</p>{wacc_table(w, inputs)}
 <p>Enterprise value {bn(bs['dcf']['enterprise_value'])}, equity {bn(bs['dcf']['equity_value'])}, {usd(bs['dcf']['value_per_share'])} per share at {a['balance_sheet_date']}; rolled a year forward at the cost of equity less dividends: <b>base DCF target {usd(bs['dcf']['target'])}</b>.</p>"""),
-            article("4. The multiple and the blend", f"""<p>Quarters 5-8 GAAP EPS {usd(bm['q5_q8_eps'], 2)} (consensus about {usd(cons_eps, 2)}) × {tm:.0f}x = <b>{usd(bm['target'])}</b>; own five-year forward range {R['pe5y_low']:.1f}x / {R['pe5y_avg']:.1f}x / {R['pe5y_high']:.1f}x, price today {bm['price_implied_multiple']:.1f}x.</p><div id='c_pe' class='chart short'></div>
+            article("4. The multiple and the blend", f"""<p>Quarters 5-8 GAAP EPS {usd(bm['q5_q8_eps'], 2)} (consensus about {usd(cons_eps, 2)}) × {tm:.0f}x = <b>{usd(bm['target'])}</b>; {pe_own}, price today {bm['price_implied_multiple']:.1f}x.</p><div id='c_pe' class='chart short'></div>
 <p>{blend_label}: bear <b>{usd(s['bear']['blended_target'])}</b>, base <b>{usd(bs['blended_target'])}</b>, bull <b>{usd(s['bull']['blended_target'])}</b>; house target {usd(h['target'])} ({pc(h['upside'], 0, True)}).</p><div id='c_tgt' class='chart'></div>"""),
         ])
 
@@ -697,7 +726,7 @@ details{{margin:8px 0}} summary{{cursor:pointer;color:var(--text-2)}} footer{{ma
 <div class="tile"><div class="k">House 12-month target</div><div class="v">{usd(h['target'])}</div><div class="n">{(esc(bl_label) + " " + usd(base_tpl.get("house"))) if base_tpl.get("house") else blend_label + ", house position " + pc(h["position"], 0, True)}</div></div>
 <div class="tile"><div class="k">Upside to house target</div><div class="v">{pc(h['upside'], 1, True)}</div><div class="n">{esc(fired[0]['name']) if fired else 'no rule fired'}</div></div>
 <div class="tile"><div class="k">Bear · Base · Bull</div><div class="v">{s['bear']['blended_target']:,.0f} · {s['base']['blended_target']:,.0f} · {s['bull']['blended_target']:,.0f}</div><div class="n">{blend_label}</div></div>
-<div class="tile"><div class="k">Price-implied forward P/E</div><div class="v">{bm['price_implied_multiple']:.1f}x</div><div class="n">target {tm:.0f}x · 5y range {R['pe5y_low']:.1f}–{R['pe5y_high']:.1f}x</div></div>
+<div class="tile"><div class="k">Price-implied forward P/E</div><div class="v">{bm['price_implied_multiple']:.1f}x</div><div class="n">target {tm:.0f}x · 5y range {_pe_range(R, "–") or "not on record"}</div></div>
 <div class="tile"><div class="k">WACC</div><div class="v">{pc(w['wacc'], 2)}</div><div class="n">rf {pc(inputs['wacc']['risk_free'], 2)} · β {inputs['wacc']['beta']:.2f} · ERP {pc(inputs['wacc']['erp'])}</div></div>
 <div class="tile"><div class="k">Base revenue CAGR FY{fy - 1}–FY{fy + 4}</div><div class="v">{pc(bs['revenue_cagr_5y'], 1)}</div><div class="n">quarters 5-8 op. margin {pc(bs['q5_q8_operating_margin'], 1)}</div></div>
 </div></div>
@@ -779,13 +808,13 @@ plot('c_rev',[
  {{type:'bar',x:D.rev.labels,y:D.rev.rev.map(v=>v/1000),name:'Revenue',marker:{{color:D.rev.labels.map((_,i)=>i<D.rev.n_hist?C.t2:C.s1)}},hovertemplate:'%{{x}} revenue $%{{y:,.0f}}bn<extra></extra>'}},
  {{type:'bar',x:D.rev.labels,y:D.rev.capex.map(v=>v/1000),name:'Capex',marker:{{color:D.rev.labels.map((_,i)=>i<D.rev.n_hist?C.grid:C.s2)}},hovertemplate:'%{{x}} capex $%{{y:,.0f}}bn<extra></extra>'}}],
  {{...base,title:{{text:'Base case: revenue and capex, $bn (grey = reported)',font:{{size:14,color:C.text}},x:0}},barmode:'group',bargap:0.2,legend:{{orientation:'h',y:-0.22}},yaxis:{{gridcolor:C.grid,zeroline:false,tickprefix:'$',ticksuffix:'bn'}},xaxis:{{showgrid:false,tickangle:-45}}}},cfg);
-plot('c_pe',[
+plot('c_pe',(D.pe.low===null?[]:[
  {{type:'scatter',mode:'lines',x:[D.pe.low,D.pe.high],y:[0,0],line:{{color:C.grid,width:6}},hoverinfo:'skip',showlegend:false}},
- {{type:'scatter',mode:'markers+text',x:[D.pe.low,D.pe.avg,D.pe.high],y:[0,0,0],text:['5y low '+D.pe.low+'x','5y average '+D.pe.avg+'x','5y high '+D.pe.high+'x'],textposition:['bottom center','bottom center','bottom center'],marker:{{color:C.t2,size:10}},hoverinfo:'skip',showlegend:false}},
+ {{type:'scatter',mode:'markers+text',x:[D.pe.low,D.pe.avg,D.pe.high],y:[0,0,0],text:['5y low '+D.pe.low+'x','5y average '+D.pe.avg+'x','5y high '+D.pe.high+'x'],textposition:['bottom center','bottom center','bottom center'],marker:{{color:C.t2,size:10}},hoverinfo:'skip',showlegend:false}}]).concat([
  {{type:'scatter',mode:'markers+text',x:[D.pe.now],y:[0],text:['price today '+D.pe.now.toFixed(1)+'x'],textposition:'top center',marker:{{color:C.s2,size:12,symbol:'diamond'}},hoverinfo:'skip',showlegend:false}},
- {{type:'scatter',mode:'markers+text',x:[D.pe.bear,D.pe.base,D.pe.bull],y:[0.35,0.35,0.35],text:['bear '+D.pe.bear+'x','base '+D.pe.base+'x','bull '+D.pe.bull+'x'],textposition:'top center',marker:{{color:[C.s2,C.s1,C.s3],size:11,symbol:'star'}},hoverinfo:'skip',showlegend:false}}],
+ {{type:'scatter',mode:'markers+text',x:[D.pe.bear,D.pe.base,D.pe.bull],y:[0.35,0.35,0.35],text:['bear '+D.pe.bear+'x','base '+D.pe.base+'x','bull '+D.pe.bull+'x'],textposition:'top center',marker:{{color:[C.s2,C.s1,C.s3],size:11,symbol:'star'}},hoverinfo:'skip',showlegend:false}}]),
  {{...base,margin:{{l:20,r:20,t:40,b:20}},title:{{text:'Forward P/E: own five-year range, today\\'s price, and the scenario targets',font:{{size:14,color:C.text}},x:0}},
-  xaxis:{{range:[Math.min(D.pe.low,D.pe.now,D.pe.bear)-2,Math.max(D.pe.high,D.pe.now,D.pe.bull)+2],ticksuffix:'x',showgrid:false,zeroline:false}},yaxis:{{visible:false,range:[-0.6,0.9]}}}},cfg);
+  xaxis:{{range:[Math.min(...[D.pe.low,D.pe.now,D.pe.bear].filter(v=>v!==null))-2,Math.max(...[D.pe.high,D.pe.now,D.pe.bull].filter(v=>v!==null))+2],ticksuffix:'x',showgrid:false,zeroline:false}},yaxis:{{visible:false,range:[-0.6,0.9]}}}},cfg);
 document.querySelectorAll('.toggle button').forEach(bt=>bt.addEventListener('click',()=>{{
  const k=bt.dataset.scn;
  document.querySelectorAll('.toggle button').forEach(b=>b.classList.toggle('on',b.dataset.scn===k));

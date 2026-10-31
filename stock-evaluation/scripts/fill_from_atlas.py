@@ -274,7 +274,11 @@ def main(argv: list[str]) -> int:
     if other["interest_income_ttm"] is None:
         notes.append(f"WARNING: forecast other income: {other['source']}")
     seg_g = {name: (ttm(f"seg:{name}", last4) / ttm(f"seg:{name}", prev4) - 1) if ttm(f"seg:{name}", prev4) else g for name in seg_defs}
-    seg_m = {name: (ttm(f"segoi:{name}", last4) / ttm(f"seg:{name}", last4)) if ttm(f"seg:{name}", last4) else 0.0 for name in seg_defs}
+    # A member with revenue but no operating income (atlas's oi_line None: the PLTR/TSM shape) is revenue-only: no
+    # margin, no segoi forecast (its ttm raised KeyError and the fill aborted, audit #90). A folder's segments.py
+    # names no oi_line: its members keep theirs.
+    with_oi = [name for name in seg_defs if (seg_defs[name] or {}).get("oi_line", f"segoi:{name}") is not None]
+    seg_m = {name: (ttm(f"segoi:{name}", last4) / ttm(f"seg:{name}", last4)) if ttm(f"seg:{name}", last4) else 0.0 for name in with_oi}
 
     def put(k, revenue, capex, oi=None, other_income=None, wc=None):
         oi = revenue * margin if oi is None else oi
@@ -301,7 +305,8 @@ def main(argv: list[str]) -> int:
             p_ = L.get(f"seg:{name}", {}).get(k - 10)
             if p_:
                 L[f"seg:{name}"][k] = p_ * (1 + clamp(seg_g[name] + (g_raw - g_ttm)))
-                L.setdefault(f"segoi:{name}", {})[k] = L[f"seg:{name}"][k] * seg_m[name]
+                if name in seg_m:
+                    L.setdefault(f"segoi:{name}", {})[k] = L[f"seg:{name}"][k] * seg_m[name]
     qs = [cur * 10 + i for i in range(1, 5)]
     put(fy0, sum(L["revenue"][k] for k in qs), sum(L["capex"][k] for k in qs), sum(L["operating_income"][k] for k in qs),
         sum(L["other_income"].get(k, 0.0) for k in qs), sum(L["wc_increase"].get(k, 0.0) for k in qs))
@@ -315,10 +320,12 @@ def main(argv: list[str]) -> int:
         d = L.get(f"seg:{name}", {})
         if all(k in d for k in qs):
             d[fy0] = sum(d[k] for k in qs)
-            L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(k, 0.0) for k in qs)
+            if name in seg_m:
+                L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(k, 0.0) for k in qs)
             for yk, j in fwd:
                 d[yk] = d[yk - 10] * (1 + clamp(seg_g[name]) * fade ** j)
-                L[f"segoi:{name}"][yk] = d[yk] * seg_m[name]
+                if name in seg_m:
+                    L[f"segoi:{name}"][yk] = d[yk] * seg_m[name]
     # balance items for the street: carry the latest actuals (bridge uses the latest reported quarter anyway)
     for line, v in carry.items():
         L.setdefault(line, {})

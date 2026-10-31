@@ -8,19 +8,28 @@ consensus block by hand; see ../references/inputs-schema.md and ../references/da
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 
 
 def main(argv: list[str]) -> int:
-    args = [a for a in argv if not a.startswith("--")]
-    if len(args) < 2:
-        print(__doc__)
-        return 2
-    ticker, name = args[0].upper(), args[1]
-    out_dir = argv[argv.index("--dir") + 1] if "--dir" in argv else os.path.join(os.getcwd(), ticker)
-    fye = int(argv[argv.index("--fye") + 1]) if "--fye" in argv else 12
+    # argparse: a flag's value is never a positional ("--dir X NVDA ..." took X as the ticker, audit #192), flags
+    # come in any position and as --dir=path, and a bad --fye is a usage error (exit 2), not a traceback.
+    p = argparse.ArgumentParser(prog="new_ticker.py", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("ticker")
+    p.add_argument("name")
+    p.add_argument("--dir")
+    p.add_argument("--fye", type=int, default=12)
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
+    ticker, name = a.ticker.upper(), a.name
+    out_dir = a.dir or os.path.join(os.getcwd(), ticker)
+    fye = a.fye
     os.makedirs(os.path.join(out_dir, "reports"), exist_ok=True)
     path = os.path.join(out_dir, "inputs.json")
     if os.path.exists(path):

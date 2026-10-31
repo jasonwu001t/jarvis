@@ -786,7 +786,7 @@ def summary(out: dict) -> str:
     for k in SCENARIOS:
         s = out["scenarios"][k]
         lines.append(f"{k:<10}{s['dcf']['target']:>10,.0f}{f(s['multiples']['target'], ',.0f', 10)}{s['blended_target']:>10,.0f}"
-                     f"{s['upside']:>9.1%}{s['revenue_cagr_5y']:>10.1%}{s['dcf']['terminal_share_of_ev']:>8.0%}{f(s['multiples']['price_implied_multiple'], '.1f', 9)}")
+                     f"{s['upside']:>9.1%}{f(s['revenue_cagr_5y'], '.1%', 10)}{s['dcf']['terminal_share_of_ev']:>8.0%}{f(s['multiples']['price_implied_multiple'], '.1f', 9)}")
     h = out["house"]
     lines.append(f"{'house':<10}{h['dcf_target']:>10,.0f}{f(h['multiples_target'], ',.0f', 10)}{h['target']:>10,.0f}{h['upside']:>9.1%}"
                  f"{'':>10}{'':>8}{f(h['implied_multiple'], '.1f', 9)}")

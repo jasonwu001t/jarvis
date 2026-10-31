@@ -407,8 +407,12 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         L.append(f"- Rules exposure {('%.0f%%' % (P['rule_exposure'] * 100)) if P.get('rule_exposure') is not None else 'keep'}; position source: {P['source']}; current position {P['current'] if P['current'] is not None else 'unknown'}")
         st, rs = P.get("state"), P.get("result")
         if st and rs:
-            L.append(f"- Regime: NFCI {st['nfci']:+.2f} ({st['nfci_date']}), VIX {st['vix']:.1f}, Baa spread {st['baa10y']:.2%}" + (f" → **stress: {', '.join(st['stress'])}**, cap {st['regime_cap']:.0%}" if st['stress'] else " → no stress"))
-            L.append(f"- Volatility: realised {st['realized_vol']:.0%} (60d) vs target → scale {st['vol_scale']:.2f}; trend: price {'above' if st['above_sma'] else 'below'} the 200-day ({money(st['sma'], 2)})" + (" → increases staged" if rs['staged'] else ""))
+            num = lambda x, spec: "—" if x is None else format(x, spec)     # too little history: no figure (audit #258)
+            trend = {True: "above", False: "below"}.get(st["above_sma"], "n/a (fewer than 200 closes) vs")
+            L.append(f"- Regime: NFCI {num(st['nfci'], '+.2f')} ({st['nfci_date']}), VIX {num(st['vix'], '.1f')}, Baa spread {num(st['baa10y'], '.2%')}" + (f" → **stress: {', '.join(st['stress'])}**, cap {st['regime_cap']:.0%}" if st['stress'] else " → no stress"))
+            vol = (f"realised {num(st['realized_vol'], '.0%')} (60d) vs target → scale {st['vol_scale']:.2f}" if st["realized_vol"] is not None
+                   else f"too little history for a 60-day volatility → scale {st['vol_scale']:.2f}")
+            L.append(f"- Volatility: {vol}; trend: price {trend} the 200-day ({money(st['sma'], 2)})" + (" → increases staged" if rs['staged'] else ""))
             L.append(f"- **Recommended exposure {rs['recommended']:.0%}** (signal {rs['signal']:.0%} → after regime {rs['after_regime']:.0%} → after vol {rs['after_vol']:.0%})")
     L.append("")
     L.append("## What the price implies (reverse DCF, base scenario)")
@@ -468,7 +472,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         L.append(f"- Rate-aware multiple: base {bm['stated_multiple']:.0f}x stated → {bm['target_multiple']:.1f}x at a {inputs['wacc']['risk_free']:.2%} ten-year")
     L.append(f"- Price-implied P/E on quarters 5-8 GAAP EPS (${bm['q5_q8_eps']:.2f}): {bm['price_implied_multiple']:.1f}x "
              f"vs target {inputs['scenarios']['base']['target_multiple']:.0f}x; own 5-year forward range {inputs['reference_multiples']['pe5y_low']}x / {inputs['reference_multiples']['pe5y_avg']}x / {inputs['reference_multiples']['pe5y_high']}x")
-    L.append(f"- Base case: revenue CAGR FY{a['latest_reported_fy']-1}-FY{a['latest_reported_fy']+4} {s['base']['revenue_cagr_5y']:.1%}, "
+    L.append(f"- Base case: revenue CAGR FY{a['latest_reported_fy']-1}-FY{a['latest_reported_fy']+4} {pct(s['base']['revenue_cagr_5y'])}, "
              f"quarters 5-8 operating margin {s['base']['q5_q8_operating_margin']:.1%}, terminal value {s['base']['dcf']['terminal_share_of_ev']:.0%} of EV")
     L.append("")
     L.append("## Checks")
