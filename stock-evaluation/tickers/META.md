@@ -37,8 +37,9 @@ House position +5% from base toward bull; 50% DCF / 50% P/E; 12-year convergence
   income by segment from the earnings press-release tables (8-K EX-99.1, URL via
   `sec.earnings_releases`). Not in SEC company-facts.
 - Multiple: P/E, GAAP (Meta reports GAAP; Bloomberg's P/E for META is GAAP).
-- Balance-sheet mapping that reproduces the template: cash & ST investments = cash + marketable
-  securities; debt = long-term debt + finance-lease liabilities (10-K only, carried forward);
+- Balance-sheet mapping: cash & ST investments = cash + marketable securities (atlas's
+  `cash_and_short_term_investments`); debt = long-term debt with its current portion + finance-lease liabilities
+  (10-K only, carried at most a year);
   investments = equity-method + non-marketable equity securities (`EquitySecuritiesWithoutReadilyDeterminableFairValueAmount`).
 - Quirks: FY2025 Q3 tax charge (EPS 1.05) distorts y/y comparisons; FY2026 Q1 tax benefit.
   Finance-lease additions are annual only in XBRL.

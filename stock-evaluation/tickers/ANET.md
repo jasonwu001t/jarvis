@@ -48,10 +48,12 @@ hyperscaler capex guide-down; proven right by gross margin holding above 63% at 
 
 - One reportable segment: `sec.segment_facts` has nothing for ANET by design. The operating split is product vs service revenue
   (`ProductOrServiceAxis` disaggregation, not a segment), keyed into the `product_growth` claim from the release table.
-- XBRL quirks (all patched, every one a WARNING in `_sources.notes`): the cash composite looks for `MarketableSecuritiesCurrent`
+- XBRL quirks (all patched, every one a WARNING in `_sources.notes`): the fill's cash looked for `MarketableSecuritiesCurrent`
   while Arista tags `AvailableForSaleSecuritiesDebtSecuritiesCurrent` ($11.1bn, five times the cash line; tagged from 2025-06-30
-  in the facts, so earlier quarters carry cash only); Q4 2025 capex not derived (`PaymentsToAcquirePropertyPlantAndEquipment`
-  annual − 9M = $37m) and Q4 share counts never served (annual used); `ContractWithCustomerLiabilityCurrent` keyed as a
+  in the facts, so earlier quarters carry cash only; since audit #21 the fill and `--apply-actuals` take atlas's
+  `cash_and_short_term_investments`, which reads it, so the patch can go at the next fill); Q4 2025 capex not derived
+  (`PaymentsToAcquirePropertyPlantAndEquipment` annual − 9M = $37m) and Q4 share counts never served (annual used);
+  `ContractWithCustomerLiabilityCurrent` keyed as a
   `deferred_revenue` line for the `level` claim; no debt (cost of debt 5% nominal so the WACC function runs); `rpo` KPI stops at
   2022 (Arista stopped tagging it); buybacks 0 in H1 2026 (true: `PaymentsForRepurchaseOfCommonStock` 0 YTD).
 - Guidance wording: "Financial Outlook For the third quarter of 2026, we expect: • Revenue of approximately $3.3 billion;

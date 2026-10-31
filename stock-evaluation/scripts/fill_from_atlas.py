@@ -8,9 +8,12 @@ regexes are fallbacks only, used when atlas has nothing for the ticker, and the 
 
 Keeps everything the analyst sets (scenarios, adjustments, rules, thesis, blend settings, wacc.erp); replaces periods,
 lines, segments, as_of and the price. The consensus block it writes is labelled as a guidance street in
-as_of.consensus_source: replace it with real sell-side consensus when you have it. Balance-sheet mapping
-(inputs.balance_mapping): investments = the listed XBRL concepts; debt adds finance-lease liabilities (10-K only,
-carried forward); cash adds marketable securities.
+as_of.consensus_source: replace it with real sell-side consensus when you have it. Balance sheet: cash = atlas's
+cash and short-term investments, else cash plus the first short-term-investment concept stated at exactly the period
+end, else cash alone (a WARNING note names the periods); debt = long-term debt with its current portion, else the
+noncurrent total_debt (WARNING), plus finance-lease liabilities; investments = the XBRL concepts listed in
+inputs.balance_mapping.investment_concepts (default equity-method + non-marketable equity). A balance only the 10-K
+states (finance leases, investments) is carried at most a year (WARNING once a concept stops).
 """
 from __future__ import annotations
 
@@ -26,10 +29,10 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import guidance as guid  # noqa: E402
 import atlas_data  # noqa: E402
-from monitor import KPI_TO_LINE, PER_SHARE, period_key  # noqa: E402
+from monitor import (KPI_TO_LINE, PER_SHARE, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
+                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS)
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
-DEFAULT_INVESTMENT_CONCEPTS = ["EquityMethodInvestments", "EquitySecuritiesWithoutReadilyDeterminableFairValueAmount"]
 
 
 def get(path: str, **params) -> dict:
@@ -52,8 +55,11 @@ def facts(ticker: str, concept: str, since: str) -> dict:
     return out
 
 
-def latest_at(series: dict, end: str):
-    ks = [k for k in series if k <= end]
+def latest_at(series: dict, end: str, max_days: int):
+    """The newest value at or before `end` and at most `max_days` older (0: that date only); 0.0 when there is none, so a
+    concept the filer stopped tagging is not carried forever (audit #21)."""
+    lo = (dt.date.fromisoformat(end) - dt.timedelta(days=max_days)).isoformat()
+    ks = [k for k in series if lo <= k <= end]
     return series[max(ks)] if ks else 0.0
 
 
@@ -144,14 +150,27 @@ def main(argv: list[str]) -> int:
         L[line] = {k: v["value"] for k, v in K.get(kpi, {}).items() if k // 10 >= since_fy - 1}
     ends = {k: v["end"] for k, v in rev.items()}
     bm = inp.get("balance_mapping") or {}
-    ms = facts(ticker, "MarketableSecuritiesCurrent", since)
+    sti = [facts(ticker, c, since) for c in SHORT_TERM_INVESTMENT_CONCEPTS]
     fl = facts(ticker, "FinanceLeaseLiability", since)
     inv = {c: facts(ticker, c, since) for c in bm.get("investment_concepts", DEFAULT_INVESTMENT_CONCEPTS)}
-    cash = {k: v["value"] for k, v in K["cash"].items()}
-    debt = {k: v["value"] for k, v in K["total_debt"].items()}
-    L["cash_and_st_investments"] = {k: cash[k] + latest_at(ms, ends[k]) for k in cash if k in ends and k // 10 >= since_fy - 1}
-    L["debt"] = {k: debt[k] + latest_at(fl, ends[k]) for k in debt if k in ends and k // 10 >= since_fy - 1}
-    L["investments"] = {k: sum(latest_at(s, ends[k]) for s in inv.values()) for k in ends if k // 10 >= since_fy - 1 and k in cash}
+    kpi_vals = lambda kpi: {k: v["value"] for k, v in K.get(kpi, {}).items() if k in ends and k // 10 >= since_fy - 1}
+    # cash: atlas's cash and short-term investments; else cash plus the first short-term investments stated at exactly
+    # the period end (never an older balance); else cash alone, said so. Debt: with its current portion; else the
+    # noncurrent total_debt, said so (an IFRS filer's total_debt holds its current portion) (audit #21)
+    cash, csti = kpi_vals("cash"), kpi_vals("cash_and_short_term_investments")
+    cash_only = sorted(k for k in cash if k % 10 and k not in csti and not any(ends[k] in s for s in sti))
+    L["cash_and_st_investments"] = {**{k: cash[k] + next((s[ends[k]] for s in sti if ends[k] in s), 0.0) for k in cash}, **csti}
+    debt, incl = kpi_vals("total_debt"), kpi_vals("long_term_debt_incl_current")
+    noncurrent = sorted(k for k in debt if k % 10 and k not in incl)
+    L["debt"] = {k: v + latest_at(fl, ends[k], CARRY_DAYS) for k, v in {**debt, **incl}.items()}
+    L["investments"] = {k: sum(latest_at(s, ends[k], CARRY_DAYS) for s in inv.values()) for k in L["cash_and_st_investments"]}
+    if cash_only:
+        notes.append(f"WARNING: cash_and_st_investments is cash alone for {', '.join(map(str, cash_only))} (no short-term investments stated at those period ends)")
+    if noncurrent and F["company_type"] != "ifrs":
+        notes.append(f"WARNING: debt for {', '.join(map(str, noncurrent))} is atlas's total_debt, the noncurrent long-term debt (no long_term_debt_incl_current)")
+    for c, s in [*inv.items(), ("FinanceLeaseLiability", fl)]:
+        if s and (dt.date.fromisoformat(rev[latest]["end"]) - dt.date.fromisoformat(max(s))).days > CARRY_DAYS:
+            notes.append(f"WARNING: {c} last stated {max(s)}, counted as 0 more than a year after that")
     L["minority_interest"] = {k: 0.0 for k in L["investments"]}
     L["other_income"] = {k: L["pretax_income"][k] - L["operating_income"][k] for k in L["pretax_income"] if k in L["operating_income"]}
     L["adjustments"] = {k: 0.0 for k in L["net_income"]}

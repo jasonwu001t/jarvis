@@ -57,8 +57,10 @@ revenue: 美投's rule for cyclicals is to exit when supply loosens, not when ea
   revenue) because the FY2026 10-K is not in the FS&N data set yet; the patch overwrites them, delete that block when XBRL lands.
 - XBRL quirks (all patched, every one a WARNING in `_sources.notes`): Q4 share counts never served (any year) and the FY2026
   annual diluted count missing; `total_debt` blank Q2-Q3 FY2026 (Micron tags `LongTermDebtAndCapitalLeaseObligations` +
-  `DebtCurrent`, the chain wants `LongTermDebt`); cash composite misses `AvailableForSaleSecuritiesDebtSecuritiesCurrent`
-  ($5.1bn) and `...Noncurrent` ($30.0bn, now in `investments`); `rpo` served but not carried into a line (keyed); interest
+  `DebtCurrent`, the chain wants `LongTermDebt`); the fill's cash missed `AvailableForSaleSecuritiesDebtSecuritiesCurrent`
+  ($5.1bn; since audit #21 it takes atlas's `cash_and_short_term_investments`, which reads it) and `...Noncurrent` ($30.0bn, now
+  in `investments`; listing it in `balance_mapping.investment_concepts` lets the fill and `--apply-actuals` carry it
+  unpatched); `rpo` served but not carried into a line (keyed); interest
   expense $106m FY2026 is net of capitalised interest, so the cost of debt is set (5%), not derived.
 - Guidance wording: a table "Business Outlook … FQ1-27 … Revenue $61.5 billion ± $1.5 billion / Gross margin Approximately
   85.95% / Operating expenses Approximately $2.31 billion / Diluted earnings per share $37.84 ± $1.00", GAAP and non-GAAP

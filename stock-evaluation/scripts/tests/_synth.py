@@ -91,16 +91,19 @@ class AtlasWorld:
     """KPI series (USD m) for fiscal years 2022 … latest, flat within a year unless `quarter_rev` says otherwise.
 
     wc_share(y, i) sets each quarter's working-capital build as a share of revenue (the fill derives it back as
-    NOPAT + D&A + SBC − OCF); interest_income / interest_expense are per quarter, USD m."""
+    NOPAT + D&A + SBC − OCF); interest_income / interest_expense are per quarter, USD m. balances adds balance KPIs
+    ({kpi: f(y, i) -> USD m or None}, the fiscal year at its Q4 value); facts adds sec.company_facts instants
+    ({metric: {period_end: USD m}}), served within the start/end window as atlas does."""
 
     def __init__(self, latest=(2026, 2), quarter_rev=None, wc_share=None, margin=0.30, cash=4000.0, debt=1000.0,
-                 interest_income=40.0, interest_expense=10.0, releases=None):
+                 interest_income=40.0, interest_expense=10.0, releases=None, balances=None, facts=None):
         self.latest = latest
         self.quarter_rev = quarter_rev or (lambda y, i: 1000.0 * 1.1 ** (y - 2022))
         self.wc_share = wc_share or (lambda y, i: 0.02)
         self.margin, self.cash, self.debt = margin, cash, debt
         self.interest_income, self.interest_expense = interest_income, interest_expense
         self.releases = releases or []
+        self.balances, self.facts = balances or {}, facts or {}
         self.kpis = self._kpis()
 
     def quarters(self):
@@ -129,12 +132,19 @@ class AtlasWorld:
                 put(kpi, k, v, end)
             for kpi, v in (("cash", self.cash), ("total_debt", self.debt), ("equity", 8000.0)):
                 put(kpi, k, v, end)
+            for kpi, f in self.balances.items():
+                if f(y, i) is not None:
+                    put(kpi, k, f(y, i), end)
         fy, q = self.latest
         for y in range(2022, fy + 1):
             if (y, 4) > (fy, q):
                 continue
             end = quarter_end(y, 4)
             for kpi in list(K):
+                if kpi in self.balances:
+                    if y * 10 + 4 in K[kpi]:
+                        put(kpi, y * 10, K[kpi][y * 10 + 4]["value"], end)
+                    continue
                 qv = [K[kpi][y * 10 + i]["value"] for i in range(1, 5)]
                 v = qv[-1] if kpi in ("cash", "total_debt", "equity") else (qv[0] if kpi == "shares_diluted" else sum(qv))
                 if kpi == "eps_diluted":
@@ -146,7 +156,10 @@ class AtlasWorld:
         return {"kpis": self.kpis, "company_type": "default", "per_share_divisor": 1.0, "native_unit": "USD"}
 
     def facts_rows(self, metric):
-        """sec.company_facts rows: InvestmentIncomeInterest as 3-month durations for Q1-Q3 and the fiscal year (no Q4 row)."""
+        """sec.company_facts rows: InvestmentIncomeInterest as 3-month durations for Q1-Q3 and the fiscal year (no Q4 row),
+        and the instants in `facts`."""
+        if metric in self.facts:
+            return [{"metric": metric, "value": v * 1e6, "period_start": None, "period_end": e} for e, v in self.facts[metric].items()]
         if metric != "InvestmentIncomeInterest":
             return []
         rows = []
@@ -163,5 +176,7 @@ class AtlasWorld:
         if path.startswith("/api/v1/market/prices/"):
             return {"data": {"rows": [{"close": 100.0, "as_of_date": "2026-10-23"}]}}
         if path.endswith("sec.company_facts/rows"):
-            return {"data": {"rows": self.facts_rows(params.get("eq.metric"))}}
+            # atlas's start/end window is on event_time, a fact's period end
+            return {"data": {"rows": [r for r in self.facts_rows(params.get("eq.metric"))
+                                      if params.get("start", "") <= r["period_end"] <= params.get("end", "9999")]}}
         raise AssertionError(f"unexpected atlas call {path} {params}")

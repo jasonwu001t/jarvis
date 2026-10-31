@@ -56,6 +56,15 @@ KPI_TO_LINE = {
 }
 PER_SHARE = {"dividends_per_share", "eps_diluted"}
 SHARES = {"shares_diluted"}
+# The equity bridge's balance concepts where atlas's composite KPIs (cash_and_short_term_investments,
+# long_term_debt_incl_current) do not state a period. Short-term investments: the first one stated at exactly the
+# balance date (the composite reads the first three; NVIDIA's DebtSecuritiesCurrent from 2026 is outside it).
+# Investments (inputs.balance_mapping.investment_concepts) and finance leases, which many filers state only in the
+# 10-K: the latest balance at most CARRY_DAYS old, so a concept the filer stopped tagging is not carried forever.
+SHORT_TERM_INVESTMENT_CONCEPTS = ["ShortTermInvestments", "MarketableSecuritiesCurrent",
+                                  "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "DebtSecuritiesCurrent"]
+DEFAULT_INVESTMENT_CONCEPTS = ["EquityMethodInvestments", "EquitySecuritiesWithoutReadilyDeterminableFairValueAmount"]
+CARRY_DAYS = 366
 
 
 def get(path: str, **params) -> dict:
@@ -124,33 +133,22 @@ def live_kpis(ticker: str) -> dict[str, dict]:
     return out
 
 
-def live_balance_sheet_extras(ticker: str, period_end: str) -> dict:
-    """Marketable securities, equity-method and non-marketable equity investments, finance-lease liabilities at one date."""
-    wanted = {"MarketableSecuritiesCurrent": "marketable_securities", "EquityMethodInvestments": "equity_method_investments",
-              "EquitySecuritiesWithoutReadilyDeterminableFairValueAmount": "non_marketable_equity",
-              "FinanceLeaseLiability": "finance_lease_liability", "LongTermDebt": "long_term_debt",
-              "CashAndCashEquivalentsAtCarryingValue": "cash"}
+def live_balance_sheet_extras(ticker: str, period_end: str, investment_concepts=None) -> dict:
+    """{concept: {value, end}} at one date: the short-term-investment concepts stated at exactly that date; the investment
+    concepts and finance-lease liabilities at the latest date up to CARRY_DAYS before it (10-K only for many filers)."""
+    wanted = {**{c: 0 for c in SHORT_TERM_INVESTMENT_CONCEPTS},
+              **{c: CARRY_DAYS for c in [*(investment_concepts or DEFAULT_INVESTMENT_CONCEPTS), "FinanceLeaseLiability"]}}
     out = {}
-    for metric, name in wanted.items():
+    for metric, days in wanted.items():
+        start = (dt.date.fromisoformat(period_end) - dt.timedelta(days=days)).isoformat()
         try:
-            rows = get("/api/v1/data/datasets/sec.company_facts/rows", start=period_end, end=period_end, limit=5,
+            rows = get("/api/v1/data/datasets/sec.company_facts/rows", start=start, end=period_end, limit=50,
                        **{"eq.ticker": ticker, "eq.metric": metric})["data"]["rows"]
         except Exception as exc:  # noqa: BLE001
-            out[name] = {"value": None, "error": str(exc)[:80]}
+            out[metric] = {"value": None, "error": str(exc)[:80]}
             continue
-        vals = [r["value"] for r in rows if r.get("period_start") is None and r["value"] is not None]
-        out[name] = {"value": vals[0] / 1e6 if vals else None}
-    if out.get("finance_lease_liability", {}).get("value") is None:
-        # only disclosed in the 10-K: carry the latest fiscal-year-end balance forward
-        try:
-            rows = get("/api/v1/data/datasets/sec.company_facts/rows", end=period_end, limit=50, order="desc",
-                       **{"eq.ticker": ticker, "eq.metric": "FinanceLeaseLiability"})["data"]["rows"]
-            vals = [(r["period_end"], r["value"]) for r in rows if r.get("period_start") is None and r["value"] is not None]
-            if vals:
-                vals.sort()
-                out["finance_lease_liability"] = {"value": vals[-1][1] / 1e6, "carried_from": vals[-1][0]}
-        except Exception as exc:  # noqa: BLE001
-            out["finance_lease_liability"] = {"value": None, "error": str(exc)[:80]}
+        vals = sorted((r["period_end"], r["value"]) for r in rows if r.get("period_start") is None and r["value"] is not None)
+        out[metric] = {"value": vals[-1][1] / 1e6, "end": vals[-1][0]} if vals else {"value": None}
     return out
 
 
@@ -267,33 +265,57 @@ def actual_vs_consensus(inputs: dict, kpis: dict, key: int) -> list[dict]:
 
 
 def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict) -> list[str]:
-    """Write the reported quarter(s) into inputs.json lines and roll the as-of markers. Returns notes."""
+    """Write the reported quarter(s) into inputs.json lines and roll the as-of markers. Returns notes. A bridge line with
+    nothing stated for the quarter is carried from the prior reported quarter, never left at the consensus value or 0,
+    and its note starts WARNING (main() adds those to the report's warnings, audit #20)."""
     notes = []
     L = inputs["lines"]
+    inv_concepts = (inputs.get("balance_mapping") or {}).get("investment_concepts", DEFAULT_INVESTMENT_CONCEPTS)
     for key in keys:
+        prev = inputs["as_of"]["latest_reported_fy"] * 10 + inputs["as_of"]["latest_reported_q"]
+        end = kpis["revenue"][key]["end"]
         for kpi, line in KPI_TO_LINE.items():
             v = kpis.get(kpi, {}).get(key, {}).get("value")
             if v is None or line in ("cash", "total_debt", "gaap_eps"):
                 continue
             L.setdefault(line, {})[str(key)] = round(v, 6)
         ex = extras_by_key.get(key, {})
-        cash = kpis.get("cash", {}).get(key, {}).get("value")
-        ms = (ex.get("marketable_securities") or {}).get("value")
-        if cash is not None and ms is not None:
-            L.setdefault("cash_and_st_investments", {})[str(key)] = round(cash + ms, 6)
-        else:
-            notes.append(f"{key}: cash_and_st_investments left blank (cash={cash}, marketable securities={ms})")
-        ltd = (ex.get("long_term_debt") or {}).get("value") or kpis.get("total_debt", {}).get(key, {}).get("value")
-        fl = (ex.get("finance_lease_liability") or {}).get("value")
+        stated = lambda c: (ex.get(c) or {}).get("value")
+        kpi_at = lambda kpi: kpis.get(kpi, {}).get(key, {}).get("value")
+
+        def bridge(line, v, why):
+            if v is None:
+                v = L.get(line, {}).get(str(prev))
+                if v is None:
+                    L.get(line, {}).pop(str(key), None)    # no consensus value read as the actual: the engine warns
+                    notes.append(f"{key}: {line} not stated ({why}) and no prior quarter to carry")
+                    return
+                if v:
+                    notes.append(f"WARNING: {key}: {line} carried from {prev} ({why})")
+            L.setdefault(line, {})[str(key)] = round(v, 6)
+
+        # cash: atlas's cash and short-term investments, else cash plus the first short-term investments stated at the date
+        cash = kpi_at("cash_and_short_term_investments")
+        if cash is None and kpi_at("cash") is not None:
+            st = next((stated(c) for c in SHORT_TERM_INVESTMENT_CONCEPTS if stated(c) is not None), None)
+            cash = kpi_at("cash") + (st or 0.0)
+            if st is None:
+                notes.append(f"WARNING: {key}: cash_and_st_investments is cash alone (no short-term investments stated at {end})")
+        bridge("cash_and_st_investments", cash, f"no cash stated at {end}")
+        # debt: long-term debt with its current portion, else atlas's total_debt; plus finance-lease liabilities
+        ltd = kpi_at("long_term_debt_incl_current")
+        if ltd is None and kpi_at("total_debt") is not None:
+            ltd = kpi_at("total_debt")
+            notes.append(f"{key}: debt from atlas's total_debt (no long_term_debt_incl_current; a US GAAP filer's current portion is not in it)")
+        fl = ex.get("FinanceLeaseLiability") or {}
+        bridge("debt", None if ltd is None else ltd + (fl.get("value") or 0.0), f"no long-term debt stated at {end}")
         if ltd is not None:
-            L.setdefault("debt", {})[str(key)] = round(ltd + (fl or 0.0), 6)
-            if fl is None:
-                notes.append(f"{key}: debt excludes finance-lease liabilities (only disclosed in the 10-K)")
-            elif (ex.get("finance_lease_liability") or {}).get("carried_from"):
-                notes.append(f"{key}: finance-lease liability carried forward from {ex['finance_lease_liability']['carried_from']} (10-K only)")
-        em, nm = (ex.get("equity_method_investments") or {}).get("value"), (ex.get("non_marketable_equity") or {}).get("value")
-        if em is not None and nm is not None:
-            L.setdefault("investments", {})[str(key)] = round(em + nm, 6)
+            if fl.get("value") is None:
+                notes.append(f"{key}: debt excludes finance-lease liabilities (none stated within a year)")
+            elif fl["end"] != end:
+                notes.append(f"{key}: finance-lease liability carried forward from {fl['end']} (10-K only)")
+        inv = [stated(c) for c in inv_concepts if stated(c) is not None]
+        bridge("investments", sum(inv) if inv else None, f"none of {', '.join(inv_concepts)} stated within a year")
         L.setdefault("minority_interest", {})[str(key)] = 0.0
         # the template's "other income" = pretax - operating income
         if L.get("pretax_income", {}).get(str(key)) is not None and L.get("operating_income", {}).get(str(key)) is not None:
@@ -303,7 +325,6 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
                 p["status"] = "actual"
         if inputs.get("segments"):
             notes.append(f"{key}: segment lines ({' / '.join(inputs['segments'])}) come from the next fill (atlas segment facts) or the press release")
-        end = kpis["revenue"][key]["end"]
         inputs["as_of"]["latest_reported_fy"], inputs["as_of"]["latest_reported_q"] = key // 10, key % 10
         inputs["as_of"]["balance_sheet_date"] = end
     return notes
@@ -561,7 +582,8 @@ def main(argv: list[str]) -> int:
             extras = {}
             for key in new_q:
                 avc[key] = actual_vs_consensus(inputs, kpis, key)
-                extras[key] = live_balance_sheet_extras(ft, kpis["revenue"][key]["end"])
+                extras[key] = live_balance_sheet_extras(ft, kpis["revenue"][key]["end"],
+                                                        (inputs.get("balance_mapping") or {}).get("investment_concepts"))
             if apply and new_q:
                 notes = apply_actuals(inputs, kpis, new_q, extras)
                 with open(path, "w", encoding="utf-8") as fh:
@@ -570,6 +592,7 @@ def main(argv: list[str]) -> int:
             live["kpis"] = {"error": str(exc)}
     model_inputs = extend_history(inputs, live["_kpis"]) if isinstance(live.get("_kpis"), dict) else inputs
     out = mm.Model(model_inputs).run()
+    out["warnings"] += [n for n in notes if n.startswith("WARNING")]   # what --apply-actuals could not state (audit #20)
     live["position"] = position(inputs, out, live)
     report = render(inputs, out, live, new_q, avc, notes)
     os.makedirs(os.path.join(HERE, "reports"), exist_ok=True)

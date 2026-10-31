@@ -56,9 +56,9 @@ capex guided >10% above the model ($307bn) without backlog growth (美投's own 
 - Guidance wording: "Third Quarter 2026 Guidance • Net sales are expected to be between $197.0 billion and
   $202.0 billion … Operating income is expected to be between $22.5 billion and $26.5 billion"
   (`guidance.py` patterns `revenue_amzn`, `operating_income_amzn`). No capex guidance in the release.
-- Balance-sheet mapping: cash + marketable securities; long-term debt + finance-lease liabilities (10-K
-  only, carried forward); investments = equity-method + non-marketable equity securities (the Anthropic
-  stake; Rivian marks flow through other income). Not used in the valuation in this mode (no bridge).
+- Balance-sheet mapping: cash + marketable securities; long-term debt with its current portion + finance-lease
+  liabilities (10-K only, carried at most a year); investments = equity-method + non-marketable equity securities (the
+  Anthropic stake; Rivian marks flow through other income). Not used in the valuation in this mode (no bridge).
 - Quirks: Q2 2026 pretax income carried ~$53bn of non-operating gains, so reported EPS and trailing P/E are
   inflated; the model sets other income to zero in the forecast. XBRL has no Q4 diluted share count.
   Beta 2-year weekly vs SPY raw 1.48 → adjusted 1.32 (display only; WACC is manual).
