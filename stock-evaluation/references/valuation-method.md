@@ -6,7 +6,9 @@ workbook to the dollar. Units: USD millions unless per share; rates as fractions
 
 ## Timeline
 
-- **Actuals** through the latest filed quarter (`as_of.latest_reported_fy/q`, `balance_sheet_date`).
+- **Actuals** through the latest filed quarter (`as_of.latest_reported_fy/q`, `balance_sheet_date`). After a
+  Q4 the whole fiscal year is actual: labelled without the "E", charted as history, and the explicit period
+  starts at FY+1.
 - **Explicit period**: the unreported quarters of the current fiscal year plus FY+1 and FY+2, from
   sell-side consensus with the house adjustments layered on.
 - **Transition**: FY+3 … FY+2+N (N = `blend.convergence_years`, 12 in the template), every driver
@@ -15,7 +17,8 @@ workbook to the dollar. Units: USD millions unless per share; rates as fractions
 
 **Exit-multiple variant (美投's AMZN method, `blend.terminal_mode: "exit_pe"`).** Consensus annual
 periods beyond FY+2 (status `consensus`, q 0) extend the explicit period; the last of them is the
-terminal year. `blend.convergence_years: 0` removes the transition entirely, so the timeline is
+terminal year. The mode has no transition years whatever `blend.convergence_years` says (the exit P/E
+already values every later year; a non-zero value draws a WARNING that it is ignored), so the timeline is
 actuals → explicit years → terminal value. The report's sensitivity grids switch to exit P/E × WACC
 and capex × margin-path when this mode is on.
 

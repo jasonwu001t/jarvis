@@ -167,14 +167,17 @@ def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str, B: dict =
     B = B or {}
     exit_pe = d.get("terminal_mode") == "exit_pe"
     at = "the fiscal year end" if B.get("valuation_date") == "fy_end" else "the balance-sheet date"
-    last_yr = d["rows"][-1]["period"] // 10
-    lines = [(f"PV of explicit-period FCFF (through FY{last_yr})" if exit_pe else "PV of explicit-period FCFF (through FY+2)", m(d["pv_stage1"]))]
-    if not exit_pe:
-        lines.append(("PV of transition-period FCFF (FY+3 … FY+14)", m(d["pv_stage2"])))
+    # year labels from this model's DCF rows, not META's (audit #22)
+    explicit, transition = [r for r in d["rows"] if r["stage"] == 1], [r for r in d["rows"] if r["stage"] == 2]
+    last_yr = explicit[-1]["period"] // 10                                     # the last explicit year
+    end_yr = transition[-1]["period"] // 10 if transition else last_yr          # the last year before the terminal value
+    lines = [(f"PV of explicit-period FCFF (through FY{last_yr})", m(d["pv_stage1"]))]
+    if transition:
+        lines.append((f"PV of transition-period FCFF (FY{transition[0]['period'] // 10} … FY{end_yr})", m(d["pv_stage2"])))
     if exit_pe:
         lines.append((f"Terminal value: FY{last_yr} net income {m(d['terminal_net_income'])} × exit P/E {d['exit_pe']:.0f}x", m(d["terminal_value"])))
     else:
-        lines.append((f"Terminal value: NOPAT 2041 × (1 − g/ROIC) / (WACC − g), g {pc(S['terminal_growth'])}, ROIC {pc(S['steady_roic'], 0)}", m(d["terminal_value"])))
+        lines.append((f"Terminal value: NOPAT FY{end_yr + 1} × (1 − g/ROIC) / (WACC − g), g {pc(S['terminal_growth'])}, ROIC {pc(S['steady_roic'], 0)}", m(d["terminal_value"])))
     lines += [(f"PV of terminal value (discounted {d['t_terminal']:.2f} years from the balance-sheet date to {at})", m(d["pv_terminal"])),
               ("<b>Enterprise value</b>", f"<b>{m(d['enterprise_value'])}</b>")]
     if B.get("equity_bridge", True):
@@ -194,7 +197,7 @@ def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str, B: dict =
         lines.append(("No roll-forward: the DCF target is the value per share as stated", ""))
     lines += [("<b>DCF target</b>", f"<b>{usd(d['target'], 2)}</b>"), ("Terminal value as a share of EV", pc(d["terminal_share_of_ev"], 0))]
     if not exit_pe:
-        lines.append(("Implied exit EV / EBITDA (2040)", f"{d['implied_exit_ev_ebitda']:.1f}x" if d["implied_exit_ev_ebitda"] else "—"))
+        lines.append((f"Implied exit EV / EBITDA (FY{end_yr})", f"{d['implied_exit_ev_ebitda']:.1f}x" if d["implied_exit_ev_ebitda"] else "—"))
     pe = [
         (f"Quarters 5-8 GAAP net income (w = {mu['weight_fy1']:.2f} on FY+1, {1 - mu['weight_fy1']:.2f} on FY+2)", m(mu["q5_q8_net_income"])),
         ("Quarters 5-8 diluted shares (m)", m(mu["q5_q8_shares"])),
@@ -259,7 +262,10 @@ def sensitivities(inputs: dict, out: dict = None) -> dict:
                 row.append(mm.Model(s).run()["scenarios"]["base"]["dcf"]["target"])
             grid.append(row)
     else:
-        roics, margins = (0.20, 0.25, 0.30), (0.34, 0.36, 0.38)
+        # centred on this ticker's base case (audit #22): ROIC ±5pp (kept above terminal growth), margin ±2pp
+        B0 = base_in["scenarios"]["base"]
+        r0, mg0 = B0["steady_roic"], B0["steady_margin"]
+        roics, margins = (max(r0 - 0.05, B0["terminal_growth"] + 0.01), r0, r0 + 0.05), (mg0 - 0.02, mg0, mg0 + 0.02)
         grid = []
         for r in roics:
             row = []
@@ -309,8 +315,9 @@ def sensitivities(inputs: dict, out: dict = None) -> dict:
     pe_grid = [[eps[k] * x for x in mults] for k in SCN]
     return {"roics": roics, "margins": margins, "grid": grid, "rfs": rf_row, "eps": eps, "mults": mults, "pe_grid": pe_grid, "targets": targets,
             "cap_factors": cap_factors, "cap_inten": cap_inten, "marg_steps": marg_steps, "cap_grid": cap_grid, "y2": y2k,
-            "base_margin": base_in["scenarios"]["base"]["steady_margin"], "exit_pe": exit_pe, "manual_wacc": manual_wacc,
-            "base_exit_pe": base_in["scenarios"]["base"].get("exit_pe"), "wacc0": w0, "last_explicit": m0.last_explicit}
+            "base_margin": base_in["scenarios"]["base"]["steady_margin"], "base_roic": base_in["scenarios"]["base"]["steady_roic"],
+            "exit_pe": exit_pe, "manual_wacc": manual_wacc,
+            "base_exit_pe": base_in["scenarios"]["base"].get("exit_pe"), "wacc0": w0, "last_explicit": m0.last_explicit, "n_conv": m0.n_conv}
 
 
 def sens_html(sn: dict, out: dict) -> str:
@@ -325,7 +332,7 @@ def sens_html(sn: dict, out: dict) -> str:
         g = "<div class='tbl'><table><thead><tr><th>Base DCF target</th>" + "".join(f"<th>margin {pc(x, 0)}</th>" for x in sn["margins"]) + "</tr></thead><tbody>"
         for r, row in zip(sn["roics"], sn["grid"]):
             g += f"<tr><th>steady ROIC {pc(r, 0)}</th>" + "".join(
-                f"<td class='num{' hl' if (abs(r - 0.25) < 1e-9 and abs(x - 0.36) < 1e-9) else ''}'>{usd(v)}</td>" for x, v in zip(sn["margins"], row)) + "</tr>"
+                f"<td class='num{' hl' if (abs(r - sn['base_roic']) < 1e-9 and abs(x - sn['base_margin']) < 1e-9) else ''}'>{usd(v)}</td>" for x, v in zip(sn["margins"], row)) + "</tr>"
         g += "</tbody></table></div>"
     p = "<div class='tbl'><table><thead><tr><th>P/E target = quarters 5-8 EPS × multiple</th>" + "".join(f"<th>{x}x</th>" for x in sn["mults"]) + "</tr></thead><tbody>"
     for k, row in zip(SCN, sn["pe_grid"]):
@@ -348,7 +355,7 @@ def sens_html(sn: dict, out: dict) -> str:
         rate = "<p>Discount rate: the WACC is set manually in this model (the average of Bloomberg's and FactSet's), so the live 10-year yield does not move it; the table steps the WACC instead.</p>" if sn["manual_wacc"] else "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
     else:
         intro = f"<p>Base DCF ({usd(base['dcf']['target'])}) against the two most subjective steady-state assumptions. The highlighted cell is the house base case.</p>{g}"
-        cap = f"<p>Capex intensity in the explicit period sets where the 12-year reinvestment glide starts, so for a capital-heavy name it is the swing assumption of the DCF leg: the grid scales FY+1 and FY+2 capex (and leases) and shifts the steady margin.</p>{cg}"
+        cap = f"<p>Capex intensity in the explicit period sets where the {sn['n_conv']}-year reinvestment glide starts, so for a capital-heavy name it is the swing assumption of the DCF leg: the grid scales FY+1 and FY+2 capex (and leases) and shifts the steady margin.</p>{cg}"
         rate = "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
     return (intro + cap + f"<p>The P/E leg is linear in the multiple: every turn of P/E is worth about {usd(sn['eps']['base'])} per share on base-case EPS.</p>{p}" + rate + r)
 
@@ -433,7 +440,7 @@ def _pe_range(R: dict, sep: str = "-") -> str | None:
 
 def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str:
     cols = model.period_meta()
-    years = [c for c in cols if c["annual"] and c["key"] >= model.fy * 10]
+    years = [c for c in cols if c["annual"] and c["status"] != "actual"]   # after a Q4 the year is history (audit #191)
     fc = {k: [tables[k]["fcff"].get(c["key"]) for c in years] for k in SCN}
     # the current-year column is the full fiscal year; the DCF uses the H2 stub (shown in the DCF table)
     labels = [c["label"].replace("E", "") for c in years]

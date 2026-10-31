@@ -1,4 +1,4 @@
-"""Engine and report faults of the 2026-10-26 bug audit (#91, #254, #255, #256, #189) on synthetic
+"""Engine and report faults of the 2026-10-26 bug audit (#91, #92, #254, #255, #256, #191, #189, #22) on synthetic
 inputs. Run with `python3 -B -m unittest discover -s scripts/tests` from the skill root."""
 import json
 import os
@@ -48,6 +48,11 @@ def chart_data(page):
     return json.loads(re.search(r"const D=(\{.*?\});\n", page).group(1))
 
 
+def highlighted(html):
+    """The first highlighted cell of the sensitivity block: the steady ROIC x margin (or exit P/E x WACC) grid's."""
+    return re.search(r"class='num hl'>([^<]+)<", html).group(1)
+
+
 class ReverseDcfGrowthCoversEveryForecastYear(unittest.TestCase):
     """#91: implied() added the solved growth only to the current FY's quarters, FY+1 and FY+2, so consensus years after
     FY+2 kept their growth while every page said 'pp in every forecast period'; the tornado's break-even disagreed."""
@@ -59,6 +64,33 @@ class ReverseDcfGrowthCoversEveryForecastYear(unittest.TestCase):
         tornado = tt._solve(lambda x: tt._targets(tt._perturb(inp, "growth_pp", x))["base"], price, -0.30, 0.30)
         self.assertIsNotNone(engine)
         self.assertAlmostEqual(engine, tornado, delta=0.001)
+
+
+class ExitPeOwnsItsTimeline(unittest.TestCase):
+    """#92: exit_pe's terminal value already covers every year after the last explicit one, yet a non-zero
+    convergence_years (the scaffold's 12) still added the transition years' FCFF on top, without a word."""
+
+    def test_the_value_does_not_depend_on_convergence_years(self):
+        runs = {}
+        for conv in (0, 12, None):
+            inp = exit_pe_inputs()
+            if conv is None:
+                del inp["blend"]["convergence_years"]
+            else:
+                inp["blend"]["convergence_years"] = conv
+            runs[conv] = mm.Model(inp).run()
+        base = runs[0]["scenarios"]["base"]["dcf"]
+        for conv in (12, None):
+            d = runs[conv]["scenarios"]["base"]["dcf"]
+            self.assertAlmostEqual(d["enterprise_value"], base["enterprise_value"], places=6)
+            self.assertAlmostEqual(d["target"], base["target"], places=6)
+            self.assertEqual(d["pv_stage2"], 0)
+        self.assertTrue(any("convergence_years" in w for w in runs[12]["warnings"]))
+        self.assertFalse(any("convergence_years" in w for w in runs[0]["warnings"]))
+        out = runs[12]
+        bridge = report_html.bridge_table(out["scenarios"]["base"], out["wacc"], exit_pe_inputs()["scenarios"]["base"],
+                                          out["price"], "Base", exit_pe_inputs()["blend"])
+        self.assertIn("through FY2028", bridge)
 
 
 class AnchorFloorOnlyLimitsTheShift(unittest.TestCase):
@@ -133,6 +165,27 @@ class EarningsBasisIsNormalised(unittest.TestCase):
         self.assertIn("bogus", str(caught.exception))
 
 
+class ReportedYearAfterAFourthQuarter(unittest.TestCase):
+    """#191: after a Q4 the fully reported fiscal year was labelled 'FY2026E' and charted as a DCF forecast bar."""
+
+    def test_the_year_is_actual_and_the_forecast_chart_starts_next_year(self):
+        inp = _synth.engine_inputs(fy=2026, q=4)
+        model = mm.Model(inp)
+        col = next(c for c in model.period_meta() if c["key"] == 20260)
+        self.assertEqual((col["label"], col["status"]), ("FY2026", "actual"))
+        out = mm.Model(inp).run()
+        tables = {k: model.table(k) for k in report_html.SCN}
+        data = json.loads(report_html.chart_payload(model, out, tables, inp))
+        self.assertEqual(data["fc"]["labels"][0], "FY2027")
+        self.assertEqual(data["rev"]["labels"][data["rev"]["n_hist"] - 1], "FY2026")
+        self.assertEqual(data["rev"]["labels"].count("FY2026"), 1)
+        self.assertNotIn("FY2026E", report_html.render(inp, out, {}, [], {}, [], [], None))
+
+    def test_a_year_in_progress_stays_a_forecast(self):
+        col = next(c for c in mm.Model(_synth.engine_inputs(fy=2026, q=2)).period_meta() if c["key"] == 20260)
+        self.assertEqual((col["label"], col["status"]), ("FY2026E", "forecast"))
+
+
 class ReportFollowsTheAnchor(unittest.TestCase):
     """#189: the report rebuilt its tables, labels and sensitivities from the template steady ROIC, while the DCF it
     stated used the anchored one."""
@@ -152,6 +205,39 @@ class ReportFollowsTheAnchor(unittest.TestCase):
         charted = dict(zip(data["fc"]["labels"], data["fc"]["base"]))
         for k, v in fcff.items():
             self.assertAlmostEqual(charted[f"FY{k // 10}"], v, places=6)
+        sn = report_html.sensitivities(inp, out)
+        self.assertEqual(highlighted(report_html.sens_html(sn, out)), report_html.usd(d["target"]))
+
+
+class SensitivityGridCentresOnTheTicker(unittest.TestCase):
+    """#22: the Gordon grid used META's ROIC (20-30%) and margin (34-38%) for every ticker and highlighted the
+    (25%, 36%) cell as the base case; the bridge's year labels were META's (FY+3 … FY+14, NOPAT 2041, 2040)."""
+
+    def inputs(self):
+        inp = _synth.engine_inputs(roic=(0.18, 0.22, 0.26))
+        inp["scenarios"]["base"]["steady_margin"] = 0.40
+        inp["blend"]["convergence_years"] = 6
+        return inp
+
+    def test_the_highlighted_cell_is_the_base_dcf(self):
+        inp = self.inputs()
+        out = mm.Model(inp).run()
+        sn = report_html.sensitivities(inp)
+        self.assertIn(0.22, sn["roics"])
+        self.assertIn(0.40, sn["margins"])
+        html = report_html.sens_html(sn, out)
+        self.assertEqual(highlighted(html), report_html.usd(out["scenarios"]["base"]["dcf"]["target"]))
+        self.assertIn("6-year reinvestment glide", html)
+
+    def test_the_bridge_names_this_model_s_years(self):
+        inp = self.inputs()
+        out = mm.Model(inp).run()
+        bridge = report_html.bridge_table(out["scenarios"]["base"], out["wacc"], inp["scenarios"]["base"], out["price"], "Base", inp["blend"])
+        self.assertIn("through FY2028", bridge)
+        self.assertIn("(FY2029 … FY2034)", bridge)
+        self.assertIn("NOPAT FY2035", bridge)
+        self.assertIn("EV / EBITDA (FY2034)", bridge)
+        self.assertNotIn("FY+14", bridge)
 
 
 if __name__ == "__main__":

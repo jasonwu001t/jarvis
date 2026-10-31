@@ -47,7 +47,8 @@ class Model:
         # further annual periods carried in the consensus block (a street to FY+5, say) extend the explicit period
         self.extra_years = sorted(int(p["key"]) for p in self.periods if p["q"] == 0 and p["status"] != "actual" and int(p["key"]) > self.fy2)
         self.last_explicit = self.extra_years[-1] if self.extra_years else self.fy2
-        self.n_conv = inputs["blend"].get("convergence_years", 12)
+        # the exit P/E values every year after the last explicit one, so that mode has no transition years (audit #92)
+        self.n_conv = 0 if inputs["blend"].get("terminal_mode") == "exit_pe" else inputs["blend"].get("convergence_years", 12)
         self.years_ext = [((self.last_explicit // 10 + k) * 10, k) for k in range(1, self.n_conv + 1)]  # extrapolated FYs, step k
 
     # ------------------------------------------------------------------ helpers
@@ -192,7 +193,7 @@ class Model:
                              "reinvest_ratio", "capex", "finance_lease_additions", "nopat", "fcff", "ebitda"]}
         e["reinvest_ratio_start"], e["reinvest_ratio_steady"] = r2, r_ss
         prev_rev = rev2
-        for yk, k in self.years_ext:   # empty when convergence_years is 0 (exit-P/E valuations)
+        for yk, k in self.years_ext:   # empty when convergence_years is 0 and in exit-P/E valuations
             f = k / N
             gr = g2 + (g - g2) * f
             rev = prev_rev * (1 + gr)
@@ -468,6 +469,9 @@ class Model:
                "returns": {**self.incremental_roic(), "steady_roic_base": self.i["scenarios"]["base"]["steady_roic"], "anchor": anchor},
                "effective_scenarios": copy.deepcopy(self.i["scenarios"]),   # what the run used (anchored ROIC): the report reads it (audit #189)
                "warnings": []}
+        conv = self.i["blend"].get("convergence_years")
+        if self.i["blend"].get("terminal_mode") == "exit_pe" and conv:
+            out["warnings"].append(f"convergence_years {conv} is ignored: the exit P/E on FY{self.last_explicit // 10} net income values every later year, so terminal_mode exit_pe has no transition years")
         if w["cost_of_debt_source"] != "inputs":
             out["warnings"].append(f"No pretax cost of debt in inputs.json: the WACC uses {w['pretax_cost_of_debt']:.2%} = {w['cost_of_debt_source']}")
         missing = [x for x in ("debt", "cash_and_st_investments", "investments") if not self.has(x, self.latest_key)]
@@ -546,7 +550,7 @@ class Model:
         for p in self.periods:
             k = int(p["key"])
             status = "actual" if (p["status"] == "actual" and k <= self.latest_key or (p["q"] == 0 and k < self.fy * 10)) else "forecast"
-            if k == self.fy * 10:
+            if k == self.fy * 10 and self.q < 4:   # after a Q4 the year is reported in full (audit #191)
                 status = "forecast"
             y, q = k // 10, k % 10
             label = f"FY{y}" if q == 0 else f"FY{y % 100} Q{q}"
