@@ -67,7 +67,9 @@ def fetch_all(ticker: str, folder: str, since: str) -> dict:
     for k in kpis:
         rows = []
         for r in k.get("quarterly", []) + k.get("annual", []):
-            if r["value"] is None:
+            # Only period-labelled points: atlas also serves date-labelled 'instant' points (shares_outstanding_cover,
+            # '2026-07-22'), which period_key cannot read and nothing here uses (audit #23).
+            if r["value"] is None or r.get("kind") not in ("quarterly", "annual"):
                 continue
             v = r["value"] if k["id"] in PER_SHARE else r["value"] / 1e6
             rows.append({"key": period_key(r["period"]), "end": r["end"], "filed": r.get("filed"), "value": v, "kind": r["kind"]})
@@ -327,7 +329,10 @@ def simulate(points: list[dict], prices: dict, bench: dict, sizing: str = "rules
 
 
 def release_evals(ticker: str, data: dict, since: str, lag_days: int = 2) -> list[tuple[str, int]]:
-    """(evaluation date, quarter key): the earnings release (8-K item 2.02) plus `lag_days` trading days."""
+    """(evaluation date, quarter key): the earnings release (8-K item 2.02) plus `lag_days` trading days (at least 1:
+    `after[lag_days - 1]` with 0 read after[-1], putting every decision on the last price date, audit #253)."""
+    if lag_days < 1:
+        raise ValueError(f"--lag must be at least 1 trading day after the release (got {lag_days})")
     rows = get("/api/v1/data/datasets/sec.earnings_releases/rows", limit=200, **{"eq.ticker": ticker})["data"]["rows"]
     releases = sorted({r["filing_date"] for r in rows if r["filing_date"] >= since and r["form"] == "8-K"})
     q_ends = sorted((r["end"], r["key"]) for r in data["kpis"]["revenue"] if r["kind"] == "quarterly")
@@ -497,8 +502,12 @@ def main(argv: list[str]) -> int:
     os.makedirs(out_dir, exist_ok=True)
     template = mm.load(os.path.join(folder, "inputs.json"))
     ticker = template["company"]["ticker"]
+    lag = int(argv[argv.index("--lag") + 1]) if "--lag" in argv else 2
+    if lag < 1:
+        print(f"--lag must be at least 1 (got {lag}): a decision is made a trading day or more after the release")
+        return 2
     data = fetch_all(ticker, folder, since)
-    evals = release_evals(ticker, data, since, lag_days=int(argv[argv.index("--lag")+1]) if "--lag" in argv else 2)
+    evals = release_evals(ticker, data, since, lag_days=lag)
     results = {}
     cache = {}
     for vname, (street, sizing, use_ov, improvements) in VARIANTS.items():
@@ -523,7 +532,6 @@ def main(argv: list[str]) -> int:
                         "q5_q8_eps": s["base"]["multiples"]["q5_q8_eps"], "pe_at_price": s["base"]["multiples"]["price_implied_multiple"]})
         sim = simulate(pts, data["prices"][ticker], data["prices"]["SPY"], sizing, use_ov, data["macro"], template["blend"].get("overlays"))
         results[vname] = {"points": pts, "sim": sim, "street": street, "sizing": sizing, "overlays": use_ov, "improvements": improvements}
-    lag = int(argv[argv.index("--lag") + 1]) if "--lag" in argv else 2
     with open(os.path.join(out_dir, "results.json"), "w", encoding="utf-8") as fh:
         json.dump({"ticker": ticker, "since": since, "generated": dt.date.today().isoformat(), "lag_days": lag, "results": results}, fh, indent=1, default=str)
     md, html = render_reports(ticker, template, since, lag, results)
