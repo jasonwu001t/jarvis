@@ -25,6 +25,28 @@ import valuation_engine as mm
 
 SCN = ("bear", "base", "bull")
 STATUS_LABEL = {"on_track": "On track", "watch": "Watch", "broken": "Broken", "pending": "Pending", "review": "Review"}
+_STATUS_ALIASES = {"fail": "broken", "failed": "broken", "pass": "on_track", "passed": "on_track", "ok": "on_track"}
+
+
+def normalise_status(status) -> tuple[str, str | None]:
+    """(a status of STATUS_LABEL, a note or None). Common aliases map ('fail' -> broken, 'pass' -> on_track); any other
+    value is 'review' with a note, so it shows instead of counting as pending (MCD's 'fail' claims never read as
+    broken, audit #98)."""
+    st = str(status or "pending").strip().lower()
+    st = _STATUS_ALIASES.get(st, st)
+    if st in STATUS_LABEL:
+        return st, None
+    return "review", f"unknown status '{status}' in inputs.json; use on_track/watch/broken/review/pending"
+
+
+def near_miss(val: float, lo, hi, tol: float) -> bool:
+    """A value outside [lo, hi] within tolerance of the bound it violates: tol x the bound, or tol itself at a zero
+    bound. Only the violated bound is measured: a two-sided band read a value far above max as near its min (and
+    far below min as near its max), so it scored Watch, never Broken (audit #97)."""
+    if (lo is None or val >= lo) and (hi is None or val <= hi):
+        return False
+    ref = lo if (lo is not None and val < lo) else hi
+    return ref is not None and abs(val - ref) <= (tol * abs(ref) if abs(ref) > 1e-9 else tol)
 
 # default step for each assumption in the tornado; a ticker overrides any of them in thesis.tornado_steps
 DEFAULT_STEPS = {"growth_pp": 0.05, "margin_pp": 0.03, "steady_margin": 0.04, "steady_roic": 0.05, "multiple_rel": 0.20,
@@ -172,6 +194,13 @@ MODEL_METRICS = {
     "steady_roic": lambda out, inp: inp["scenarios"]["base"].get("steady_roic"),
     "q5_q8_eps": lambda out, inp: out["scenarios"]["base"]["multiples"].get("q5_q8_eps"),
 }
+#: Each model metric's unit and basis, which a company target's must match to be scored (audit #259). The P/E leg's
+#: EPS is on the engine's earnings basis; the operating margin is GAAP.
+MODEL_UNITS = {"revenue_cagr_5y": "pct", "q5_q8_operating_margin": "pct", "steady_margin": "pct",
+               "steady_roic": "pct", "q5_q8_eps": "usd"}
+MODEL_BASES = {"q5_q8_operating_margin": lambda inp: "gaap",
+               "q5_q8_eps": lambda inp: "non_gaap" if str((inp.get("blend") or {}).get("earnings_basis", "GAAP")).lower()
+               not in ("gaap", "ifrs") else "gaap"}
 
 
 def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, rules_eval: list = None,
@@ -188,6 +217,7 @@ def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, ru
         r = {"id": c.get("id"), "side": c.get("side", "buy"), "weight": c.get("weight", "strong"), "claim": c.get("claim", ""),
              "evidence": c.get("evidence", ""), "as_of": c.get("as_of"), "due": c.get("due"), "source": c.get("source", ""),
              "status": c.get("status", "pending"), "metric": None, "auto": False}
+        r["status"], r["metric"] = normalise_status(r["status"])
         chk = c.get("check")
         if chk:
             r["auto"] = True
@@ -207,8 +237,8 @@ def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, ru
                 elif kind == "rule":
                     fired = {r["name"] for r in (rules_eval or []) if r.get("fired")}
                     hit = chk.get("name") in fired
-                    r["status"] = (chk.get("when_fired", "broken") if hit else chk.get("when_clear", "on_track"))
-                    r["metric"] = f"rule '{chk.get('name')}' {'fired' if hit else 'did not fire'} this run"
+                    r["status"], odd = normalise_status(chk.get("when_fired", "broken") if hit else chk.get("when_clear", "on_track"))
+                    r["metric"] = f"rule '{chk.get('name')}' {'fired' if hit else 'did not fire'} this run" + (f"; {odd}" if odd else "")
                     r["as_of"] = today.isoformat()
                     res.append(r)
                     continue
@@ -242,8 +272,7 @@ def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, ru
                     else:
                         val, lo, hi, tol = ch["pct"], chk.get("min"), chk.get("max"), chk.get("tolerance", 0.5)
                         ok = (lo is None or val >= lo) and (hi is None or val <= hi)
-                        near = (not ok) and ((lo is not None and val >= lo - tol * abs(lo)) or (hi is not None and val <= hi + tol * abs(hi)))
-                        r["status"] = "on_track" if ok else ("watch" if near else "broken")
+                        r["status"] = "on_track" if ok else ("watch" if near_miss(val, lo, hi, tol) else "broken")
                         r["metric"] = (f"{ch['days']}-day change {val:+.1%} ({ch['from']} → {ch['to']}, {cn.get('latest', {}).get('estimates')} estimates, "
                                        f"{cn.get('revisions', 0)} revisions since {str(cn.get('first', {}).get('captured_at', ''))[:10]}) for {cn.get('report_date')}"
                                        + (f"; min {lo:+.1%}" if lo is not None else "") + (f"; max {hi:+.1%}" if hi is not None else ""))
@@ -256,14 +285,22 @@ def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, ru
                     mv = getter(out, inp) if getter else None
                     src = (targets or {}).get("source") or {}
                     tol = chk.get("tolerance", 0.05)
+                    unit = MODEL_UNITS.get(chk.get("model"))
+                    basis = MODEL_BASES.get(chk.get("model"), lambda i: None)(inp)
+                    t_basis = str(tg.get("basis") or "").lower().replace("-", "_") or None
                     if mv is None or not tg:
                         r["status"], r["metric"] = "pending", f"no company target '{chk.get('target')}' or model metric '{chk.get('model')}'"
+                    elif (tg.get("unit") and unit and tg["unit"] != unit) or (t_basis and basis and t_basis != basis):
+                        # a non-GAAP margin target against the GAAP model margin, or a dollar target against a percent,
+                        # is no comparison: review it, never On track or Broken (audit #259)
+                        r["status"] = "review"
+                        r["metric"] = (f"company target '{chk.get('target')}' is {tg.get('unit') or '?'}/{t_basis or '?'}, the model's "
+                                       f"'{chk.get('model')}' {unit or '?'}/{basis or '?'}: not compared")
                     else:
                         lo_t, hi_t = tg.get("min"), tg.get("max")
                         ok = (lo_t is None or mv >= lo_t) and (hi_t is None or mv <= hi_t)
-                        near = (not ok) and ((lo_t is not None and mv >= lo_t * (1 - tol)) or (hi_t is not None and mv <= hi_t * (1 + tol)))
-                        r["status"] = "on_track" if ok else ("watch" if near else "broken")
-                        fmtv = (lambda x: pc(x, 1)) if abs(mv) < 3 else (lambda x: f"{x:,.2f}")
+                        r["status"] = "on_track" if ok else ("watch" if near_miss(mv, lo_t, hi_t, tol) else "broken")
+                        fmtv = (lambda x: pc(x, 1)) if (unit or tg.get("unit")) == "pct" else (lambda x: f"{x:,.2f}")
                         tgt_txt = " · ".join([f"≥ {fmtv(lo_t)}" if lo_t is not None else "", f"≤ {fmtv(hi_t)}" if hi_t is not None else ""]).strip(" ·")
                         r["metric"] = f"model base {fmtv(mv)} vs company target {tgt_txt} ({esc(src.get('title', 'company target'))}, {esc(src.get('published', ''))}{', unverified' if src.get('verified') is False else ''})"
                     r["as_of"] = src.get("published") or r["as_of"]
@@ -282,12 +319,8 @@ def evaluate_claims(inp: dict, model_inputs: dict, out: dict, today: dt.date, ru
                 r["status"], r["metric"] = "pending", f"no {kind} value for FY{key // 10} Q{key % 10}" if key % 10 else f"no value for FY{key // 10}"
             else:
                 ok = (lo is None or val >= lo) and (hi is None or val <= hi)
-                near = False
-                if not ok:
-                    ref = lo if (lo is not None and val < lo) else hi
-                    # the band is tolerance x the threshold; at a zero threshold (break-even, flat q/q) the tolerance is the band itself
-                    near = ref is not None and abs(val - ref) <= (tol * abs(ref) if abs(ref) > 1e-9 else tol)
-                r["status"] = "on_track" if ok else ("watch" if near else "broken")
+                # the band is tolerance x the threshold; at a zero threshold (break-even, flat q/q) the tolerance is the band itself
+                r["status"] = "on_track" if ok else ("watch" if near_miss(val, lo, hi, tol) else "broken")
                 thr = " · ".join([f"min {show(lo)}" if lo is not None else "", f"max {show(hi)}" if hi is not None else ""]).strip(" ·")
                 r["metric"] = f"{show(val)} in FY{key // 10} Q{key % 10} ({thr})" if key % 10 else f"{show(val)} in FY{key // 10} ({thr})"
             r["as_of"] = inp["as_of"]["balance_sheet_date"]
