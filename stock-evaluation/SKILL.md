@@ -30,7 +30,8 @@ same engine and report and adds its own playbook.
      scaffolds `inputs.json` (with two generic claims); then `python3 scripts/fill_from_atlas.py --dir … --since-fy <FY>`
      fills the history (US GAAP or IFRS, in USD, per listed share), balance-sheet composites, business segments
      from atlas's segment facts and a guidance street from `sec.earnings_guidance` (next-quarter ranges,
-     beat-adjusted, fading to trend, the extrapolated growth capped at ±50% a year by `--growth-cap`; after a
+     beat-adjusted, fading to trend; an operating-income guide only on a GAAP basis, a non-GAAP-only one leaving
+     the guided quarter at the TTM GAAP margin with a WARNING; the extrapolated growth capped at ±50% a year by `--growth-cap`; after a
      Q4 the reported year stays as filed and the street starts at the guided Q1; other income = net interest
      at the last four quarters' rates on the carried cash and debt; working capital reverting from its TTM
      share to the historical median by FY+2; every TTM ratio over the quarters both its lines have, a Q4 atlas

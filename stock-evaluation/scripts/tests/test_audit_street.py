@@ -110,5 +110,62 @@ class OtherIncomeWithAnInterestExpenseGap(FillCase):
         self.assertTrue(_warned(inp, "forecast other income"))
 
 
+class GuidanceBasis(FillCase):
+    """#93: a non-GAAP operating-income guide was beat-adjusted against GAAP actuals and set the guided quarter's GAAP
+    operating income (CRWD: oi_beat −0.342); with GAAP and non-GAAP rows the first row won."""
+
+    def rows_payload(self, rows):
+        cols = ["accession_number", "knowledge_time", "period_key", "fiscal_year", "fiscal_quarter", "metric", "period_kind",
+                "low", "high", "mid", "unit", "basis", "source_text"]
+        return {"data": {"columns": [{"name": c} for c in cols], "rows": [[r.get(c) for c in cols] for r in rows]}}
+
+    def test_gaap_row_wins_in_either_order(self):
+        base = {"accession_number": "a1", "knowledge_time": "2026-07-29T13:00:00", "period_key": 20263,
+                "metric": "operating_income", "period_kind": "next_quarter", "unit": "USD", "source_text": "x"}
+        gaap = {**base, "low": 90e6, "high": 110e6, "mid": 100e6, "basis": "gaap"}
+        non = {**base, "low": 490e6, "high": 510e6, "mid": 500e6, "basis": "non_gaap"}
+        saved = atlas_data.get
+        try:
+            for rows in ([gaap, non], [non, gaap]):
+                atlas_data.get = lambda path, _rows=rows, **kw: self.rows_payload(_rows)
+                oi = atlas_data.guidance_releases("ZZZ")[0]["operating_income_next_quarter"]
+                self.assertEqual((oi["mid"], oi["basis"]), (100.0, "gaap"))
+            atlas_data.get = lambda path, **kw: self.rows_payload([non])
+            self.assertEqual(atlas_data.guidance_releases("ZZZ")[0]["operating_income_next_quarter"]["basis"], "non_gaap")
+        finally:
+            atlas_data.get = saved
+
+    def releases(self, world, basis):
+        rev = lambda k: world.kpis["revenue"][k]["value"]
+        out = []
+        for k, date in ((20261, "2026-02-01"), (20262, "2026-05-01")):
+            out.append({"date": date, "accession": f"a{k}", "parsed": True,
+                        "revenue_next_quarter": {"period_key": k, "low": 0, "high": 0, "mid": rev(k) / 1.02},
+                        "operating_income_next_quarter": {"period_key": k, "low": 0, "high": 0, "mid": rev(k) * 0.6, "basis": basis}})
+        mid = rev(20253) * 1.1
+        out.append({"date": "2026-07-29", "accession": "g", "parsed": True,
+                    "revenue_next_quarter": {"period_key": 20263, "low": 0, "high": 0, "mid": mid},
+                    "operating_income_next_quarter": {"period_key": 20263, "low": 0, "high": 0, "mid": mid * 0.45, "basis": basis}})
+        return out
+
+    def test_non_gaap_operating_income_guide_is_not_used_as_gaap(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        world.releases = self.releases(world, "non_gaap")
+        inp = self.fill(world)
+        L = _lines(inp)
+        self.assertEqual(inp["_street"]["oi_beat"], 1.0)
+        self.assertAlmostEqual(L["operating_income"][20263] / L["revenue"][20263], inp["_street"]["margin_ttm"], places=9)
+        self.assertTrue(any("non-GAAP" in n for n in inp["_sources"]["notes"]))
+        self.assertNotIn("and operating income", inp["as_of"]["consensus_source"])
+
+    def test_gaap_operating_income_guide_still_beat_adjusted(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        world.releases = self.releases(world, "gaap")
+        inp = self.fill(world)
+        L = _lines(inp)
+        self.assertAlmostEqual(inp["_street"]["oi_beat"], 0.5, places=9)    # GAAP actual 30% of revenue over a 60% guide
+        self.assertAlmostEqual(L["operating_income"][20263], world.releases[-1]["operating_income_next_quarter"]["mid"] * 0.5, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

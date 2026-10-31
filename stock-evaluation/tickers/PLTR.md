@@ -58,3 +58,4 @@ growth below 50%.
 - 2026-10-23: built on the 美投 consensus-as-bear exit-P/E method, reproducing 157/193/245; narrative from five
   美投 pieces.
 - 2026-10-25: the report's model table shows the Government / Commercial rows from the `segments` block; the checks use the deferred-revenue rule (detected: median working-capital build -2.4% of revenue); the starting-reinvestment check still warns (capex less D&A 0.3% of revenue against the 4.5-5.4% the steady ROIC needs). Monitor rerun: 157 / 193 / 245 unchanged.
+- 2026-10-31: skill fix (audit #93): a refill no longer beat-adjusts Palantir's non-GAAP-only operating-income guide against GAAP actuals (the audit's scratch refill: the 1,294 non-GAAP guide x 0.751); the guided quarter takes the TTM GAAP margin, with a WARNING. Not rerun here.

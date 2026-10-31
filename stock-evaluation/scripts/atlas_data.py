@@ -124,10 +124,14 @@ def _musd(v, unit):
     return v / 1e6 if unit == "USD" else v
 
 
+BASIS_RANK = {"gaap": 0, "non_gaap": 2}     # an unstated basis ranks 1
+
+
 def guidance_releases(ticker: str, since: str = None) -> list:
     """Every parsed guidance row grouped per release, newest last, in guidance.py's shape:
-    [{date, accession, revenue_next_quarter: {period_key, low, high, mid}, operating_income_next_quarter, capex_full_year,
-      expenses_full_year, gross_margin_next_quarter, operating_margin_next_quarter, parsed: True}]."""
+    [{date, accession, revenue_next_quarter: {period_key, low, high, mid, unit, basis, source_text}, operating_income_next_quarter,
+      capex_full_year, expenses_full_year, gross_margin_next_quarter, operating_margin_next_quarter, parsed: True}].
+    Where a release states a metric on more than one basis, the GAAP row is kept."""
     params = {"eq.ticker": ticker, "limit": 2000}
     if since:
         params["start"] = since
@@ -150,7 +154,9 @@ def guidance_releases(ticker: str, since: str = None) -> list:
                 ("capex", "fiscal_year"): "capex_full_year", ("opex", "fiscal_year"): "expenses_full_year",
                 ("gross_margin", "next_quarter"): "gross_margin_next_quarter", ("operating_margin", "next_quarter"): "operating_margin_next_quarter",
                 ("eps", "next_quarter"): "eps_next_quarter", ("tax_rate", "next_quarter"): "tax_rate_next_quarter"}.get((r.get("metric"), kind))
-        if name and name not in g:
+        # One row per metric and period kind: GAAP over an unstated basis over non-GAAP, whatever the row order (MU
+        # states eps and gross margin on both); the kept row's basis says which (audit #93).
+        if name and (name not in g or BASIS_RANK.get(val["basis"], 1) < BASIS_RANK.get(g[name]["basis"], 1)):
             g[name] = val
     out = sorted(by.values(), key=lambda g: g["date"])
     return out

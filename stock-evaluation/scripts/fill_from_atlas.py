@@ -312,13 +312,19 @@ def main(argv: list[str]) -> int:
     wc_med = statistics.median(L["wc_increase"][k] / L["revenue"][k] for k in wc_years) if wc_years else None
     wc_share = lambda y: wc_r if wc_med is None else wc_r + (wc_med - wc_r) * min(1.0, max(0.0, (y - fy) / 2))
     gd = next((r for r in reversed(releases) if r.get("revenue_next_quarter") and r["revenue_next_quarter"]["period_key"] > latest), None)
+    # The actuals are GAAP operating income: a non-GAAP operating-income guide is neither beat-adjusted against them nor
+    # used for the guided quarter, which then takes the TTM GAAP margin (audit #93; CRWD and PLTR guide non-GAAP only).
+    gaap_oi = lambda r: r.get("operating_income_next_quarter") if (r.get("operating_income_next_quarter") or {}).get("basis") != "non_gaap" else None
+    gd_oi = gaap_oi(gd) if gd else None
+    if gd and gd.get("operating_income_next_quarter") and not gd_oi:
+        notes.append(f"WARNING: operating-income guidance in the {gd['date']} release is non-GAAP only: the guided quarter at the TTM GAAP margin")
     beats = []
     oi_beats = []
     for r in releases:
         rv = r.get("revenue_next_quarter")
         if rv and rv["period_key"] in rev and rv["period_key"] <= latest:
             beats.append(rev[rv["period_key"]]["value"] / rv["mid"])
-        oi = r.get("operating_income_next_quarter")
+        oi = gaap_oi(r)
         if oi and oi["period_key"] in L["operating_income"] and oi["period_key"] <= latest:
             oi_beats.append(L["operating_income"][oi["period_key"]] / oi["mid"])
     beat = statistics.fmean(beats[-6:]) if beats else 1.0
@@ -368,8 +374,8 @@ def main(argv: list[str]) -> int:
         oi_k = None
         if gd and k == gd["revenue_next_quarter"]["period_key"]:
             rev_k = gd["revenue_next_quarter"]["mid"] * beat
-            if gd.get("operating_income_next_quarter"):
-                oi_k = gd["operating_income_next_quarter"]["mid"] * oi_beat
+            if gd_oi:
+                oi_k = gd_oi["mid"] * oi_beat
         put(k, rev_k, L["capex"].get(k - 10, L["capex"][last4[-1]]) * (1 + g_capex), oi_k)
         for name in seg_defs:
             p_ = L.get(f"seg:{name}", {}).get(k - 10)
@@ -419,7 +425,7 @@ def main(argv: list[str]) -> int:
     inp["as_of"].update({"latest_reported_fy": fy, "latest_reported_q": q, "balance_sheet_date": rev[latest]["end"],
                          "consensus_date": dt.date.today().isoformat(),
                          "consensus_source": (f"Guidance street built by fill_from_atlas.py on {dt.date.today()}: next-quarter revenue"
-                                              + (" and operating income" if gd and gd.get("operating_income_next_quarter") else "")
+                                              + (" and operating income" if gd_oi else "")
                                               + f" from the {gd['date']} press release (beat-adjusted x{beat:.3f}" + (f", OI x{oi_beat:.3f}" if oi_beats else "") + ")" if gd else "momentum street")
                                              + (f"; FY{fy} is reported in full, the street starts at FY{fy + 1} Q1" if q == 4 else "")
                                              + f"; growth {g:+.1%}" + (f" (capped from {g_raw:+.1%} at ±{cap:.0%})" if abs(g_raw - g) > 1e-12 else "") + f" fading {fade:.0%}/yr"
