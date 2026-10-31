@@ -77,3 +77,5 @@ capex guided >10% above the model ($307bn) without backlog growth (美投's own 
 
 - 2026-10-22: built on the guidance street (first run bear/base/bull 143/184/224, DCF leg structurally low
   at 26% capex intensity); rebuilt the same day on the 美投 exit-P/E method, reproducing 219/294/384.
+- 2026-10-25: `segments.py` removed; atlas segment facts (AWS, North America, International) match the press-release lines: revenue exact, operating income within the $0.1bn rounding of the releases. Guidance from `sec.earnings_guidance` (11 releases, revenue and operating income; the Amazon-specific regexes are deleted). A generic fill on a scratch copy produced a guidance street (147 base vs the keyed 美投 consensus 294): the keyed block stays as the model's street, labelled.
+- 2026-10-25: the report's model table now shows the North America / International / AWS rows from the `segments` block (skill fix: the rows were META's); checks name their rule (standard). Monitor rerun: 219 / 294 / 384 unchanged.

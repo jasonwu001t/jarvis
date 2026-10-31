@@ -60,13 +60,9 @@ ROW_SPECS = {
     "income": [
         ("Income statement", None, "head"),
         ("Total revenue", "revenue", "m"), ("  growth y/y", "yoy:revenue", "pct"),
-        ("Family of Apps revenue", "seg:Family of Apps", "m"), ("  growth y/y", "yoy:seg:Family of Apps", "pct"),
-        ("  Advertising", "seg:Advertising", "m"), ("    growth y/y", "yoy:seg:Advertising", "pct"),
-        ("  Other revenue", "seg:Other Revenue", "m"), ("    growth y/y", "yoy:seg:Other Revenue", "pct"),
-        ("Reality Labs revenue", "seg:Reality Labs", "m"), ("  growth y/y", "yoy:seg:Reality Labs", "pct"),
+        ("__segment_revenue__", None, "segments"),
         ("Operating income", "operating_income", "m"), ("  growth y/y", "yoy:operating_income", "pct"), ("  operating margin", "margin", "pct"),
-        ("Family of Apps operating income", "segoi:Family of Apps", "m"), ("  margin", "segm:Family of Apps", "pct"),
-        ("Reality Labs operating income", "segoi:Reality Labs", "m"), ("  margin", "segm:Reality Labs", "pct"),
+        ("__segment_oi__", None, "segments"),
         ("Other income (expense)", "other_income", "m"),
         ("Pretax income", "pretax_income", "m"), ("  growth y/y", "yoy:pretax_income", "pct"),
         ("Income tax", "income_tax", "m"), ("  effective rate", "tax_rate", "pct"),
@@ -105,6 +101,31 @@ ROW_SPECS = {
 }
 
 
+def row_specs(segments: dict) -> dict:
+    """ROW_SPECS with the segment rows built from the folder's `segments` block: revenue and growth per segment (children
+    indented under their parent), operating income and margin for every segment that has an oi_line."""
+    def depth(name):
+        d, p = 0, (segments.get(name) or {}).get("parent")
+        while p:
+            d, p = d + 1, (segments.get(p) or {}).get("parent")
+        return d
+
+    def ordered(parent=None):
+        out = []
+        for name, spec in segments.items():
+            if (spec or {}).get("parent") == parent:
+                out += [name] + ordered(name)
+        return out
+    rev_rows, oi_rows = [], []
+    for name in ordered():
+        pad = "  " * depth(name)
+        rev_rows += [(f"{pad}{name}" if pad else f"{name} revenue", f"seg:{name}", "m"), (f"{pad}  growth y/y", f"yoy:seg:{name}", "pct")]
+        if (segments[name] or {}).get("oi_line"):
+            oi_rows += [(f"{pad}{name} operating income", f"segoi:{name}", "m"), (f"{pad}  margin", f"segm:{name}", "pct")]
+    spliced = {"__segment_revenue__": rev_rows, "__segment_oi__": oi_rows}
+    return {sec: [r for row in rows for r in (spliced.get(row[0], [row]) if row[2] == "segments" else [row])] for sec, rows in ROW_SPECS.items()}
+
+
 def model_table(model: mm.Model, scn: str, T: dict, cols: list[dict], section: str, which: str = "all") -> str:
     """One HTML table for a section of the model; `which` = 'all' | 'explicit' (through FY+2) | 'transition'."""
     if which == "explicit":
@@ -113,7 +134,7 @@ def model_table(model: mm.Model, scn: str, T: dict, cols: list[dict], section: s
         cols = [c for c in cols if c["status"] == "extrapolated" or c["key"] == model.fy2]
     head = "".join(f"<th class='{c['status']}{' annual' if c['annual'] else ''}'>{esc(c['label'])}</th>" for c in cols)
     body = []
-    for label, row, kind in ROW_SPECS[section]:
+    for label, row, kind in row_specs(model.i["segments"])[section]:
         if kind == "head":
             body.append(f"<tr class='sect'><th colspan='{len(cols) + 1}'>{esc(label)}</th></tr>")
             continue
@@ -179,13 +200,19 @@ def bridge_table(sc: dict, w: dict, S: dict, price: float, label: str, B: dict =
         ("Quarters 5-8 diluted shares (m)", m(mu["q5_q8_shares"])),
         ("Quarters 5-8 EPS", usd(mu["q5_q8_eps"], 2)),
         ("Target P/E", f"{mu['target_multiple']:.1f}x"),
-        ("<b>P/E target</b>", f"<b>{usd(mu['target'], 2)}</b>"),
-        ("Implied P/E on FY+1 / FY+2 EPS", f"{mu['implied_pe_fy1']:.1f}x / {mu['implied_pe_fy2']:.1f}x"),
-        (f"P/E the current price ({usd(price, 2)}) pays on quarters 5-8 EPS", f"{mu['price_implied_multiple']:.1f}x"),
     ]
     dw = B.get("dcf_weight", 0.5)
-    blend = [(f"DCF target × {pc(dw, 0)}", usd(d["target"] * dw, 2)), (f"P/E target × {pc(1 - dw, 0)}", usd(mu["target"] * (1 - dw), 2)),
-             (f"<b>{label} blended target</b>", f"<b>{usd(sc['blended_target'], 2)}</b>"), ("vs price", pc(sc["upside"], 1, True))]
+    if mu.get("disabled"):
+        pe += [("<b>P/E target</b>", "<b>disabled</b>"),
+               (f"<span class='fail'>WARNING: quarters 5-8 net income is {pc(mu.get('q5_q8_net_margin'), 1)} of revenue, a negative or near-zero earnings base: "
+                f"the P/E leg is off for this scenario and its {pc(1 - dw, 0)} weight moves to the DCF</span>", "")]
+        blend = [("DCF target × 100% (P/E leg disabled)", usd(d["target"], 2))]
+    else:
+        pe += [("<b>P/E target</b>", f"<b>{usd(mu['target'], 2)}</b>"),
+               ("Implied P/E on FY+1 / FY+2 EPS", f"{mu['implied_pe_fy1']:.1f}x / {mu['implied_pe_fy2']:.1f}x" if mu.get("implied_pe_fy1") and mu.get("implied_pe_fy2") else "—"),
+               (f"P/E the current price ({usd(price, 2)}) pays on quarters 5-8 EPS", f"{mu['price_implied_multiple']:.1f}x")]
+        blend = [(f"DCF target × {pc(dw, 0)}", usd(d["target"] * dw, 2)), (f"P/E target × {pc(1 - dw, 0)}", usd(mu["target"] * (1 - dw), 2))]
+    blend += [(f"<b>{label} blended target</b>", f"<b>{usd(sc['blended_target'], 2)}</b>"), ("vs price", pc(sc["upside"], 1, True))]
 
     def tbl(title, rows):
         return (f"<h4>{title}</h4><div class='tbl'><table><tbody>" +
@@ -200,7 +227,8 @@ def wacc_table(w: dict, inputs: dict) -> str:
             ("Cost of equity = rf + β × ERP", pc(w["cost_of_equity"], 2)),
             ("Market capitalisation (USD m)", m(w["market_cap"])), ("Interest-bearing debt (USD m)", m(w["debt"])),
             ("Equity weight / debt weight", f"{pc(w['weight_equity'], 1)} / {pc(w['weight_debt'], 1)}"),
-            ("Pretax cost of debt", pc(W["pretax_cost_of_debt"], 2)), ("TTM effective tax rate", pc(w["ttm_tax_rate"], 1)),
+            ("Pretax cost of debt" + ("" if w.get("cost_of_debt_source", "inputs") == "inputs" else f" (fallback: {esc(w['cost_of_debt_source'])})"),
+             pc(w.get("pretax_cost_of_debt", W.get("pretax_cost_of_debt")), 2)), ("TTM effective tax rate", pc(w["ttm_tax_rate"], 1)),
             ("After-tax cost of debt", pc(w["after_tax_cost_of_debt"], 2)), ("<b>WACC</b>", f"<b>{pc(w['wacc'], 2)}</b>")]
     return "<div class='tbl'><table><tbody>" + "".join(f"<tr><td>{a}</td><td class='num'>{b}</td></tr>" for a, b in rows) + "</tbody></table></div>"
 
@@ -450,8 +478,11 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         where = f"between the base case ({usd(s['base']['blended_target'])}) and the bull case ({usd(s['bull']['blended_target'])}): the house view is largely priced in"
     else:
         where = f"above the bull case ({usd(s['bull']['blended_target'])}): the price needs more than the most optimistic scenario"
-    verdict = (f"At {usd(price, 2)} the stock trades {where}. The price pays {bm['price_implied_multiple']:.1f}x the model's quarters-5-8 EPS "
-               f"({usd(bm['q5_q8_eps'], 2)}), against {esc(co)}'s own five-year forward range of {R['pe5y_low']:.1f}x-{R['pe5y_high']:.1f}x (average {R['pe5y_avg']:.1f}x) and the {tm:.0f}x the base case assigns. "
+    pe_txt = (f"The base case's quarters-5-8 earnings ({usd(bm['q5_q8_eps'], 2)} a share) are negative or near zero, so its P/E leg is off and the DCF carries the whole value. "
+              if bm.get("disabled") else
+              f"The price pays {bm['price_implied_multiple']:.1f}x the model's quarters-5-8 EPS "
+              f"({usd(bm['q5_q8_eps'], 2)}), against {esc(co)}'s own five-year forward range of {R['pe5y_low']:.1f}x-{R['pe5y_high']:.1f}x (average {R['pe5y_avg']:.1f}x) and the {tm:.0f}x the base case assigns. ")
+    verdict = (f"At {usd(price, 2)} the stock trades {where}. {pe_txt}"
                f"House 12-month target {usd(h['target'])} ({pc(h['upside'], 1, True)}); rule in force: <b>{esc(fired[0]['name']) if fired else 'none'}</b>.")
 
     # ---- scenario matrix
@@ -485,7 +516,8 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
             ("Terminal growth", *[pc(S[x]["terminal_growth"], 1) for x in SCN], ""),
         ]
     matrix_rows += [
-        ("Target P/E on quarters 5-8 EPS", *[f"{S[x]['target_multiple']:.0f}x" for x in SCN], f"{h['implied_multiple']:.1f}x implied"),
+        ("Target P/E on quarters 5-8 EPS", *[f"{S[x]['target_multiple']:.0f}x" + (" (off)" if s[x]["multiples"].get("disabled") else "") for x in SCN],
+         f"{h['implied_multiple']:.1f}x implied" if h.get("implied_multiple") is not None else "—"),
         ("<b>What you get</b>", "", "", "", ""),
         (f"Revenue CAGR FY{fy - 1}-FY{fy + 4}", *[pc(s[x]["revenue_cagr_5y"], 1) for x in SCN], ""),
         ("Quarters 5-8 EPS", *[usd(s[x]["multiples"]["q5_q8_eps"], 2) for x in SCN], ""),
@@ -559,7 +591,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
 
     def valuation_section(k):
         sc = s[k]
-        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'])}{bridge_table(sc, w, S[k], price, SCN_LABEL[k], inputs["blend"])}"
+        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'])}{bridge_table(sc, w, S[k], price, SCN_LABEL[k], inputs['blend'])}"
 
     toggle = "<div class='toggle' role='tablist'>" + "".join(
         f"<button role='tab' data-scn='{k}' class='{'on' if k == 'base' else ''}'>{SCN_LABEL[k]}</button>" for k in SCN) + "</div>"
@@ -601,6 +633,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     if applied_notes:
         newq_html += "<p>Applied to inputs.json:</p><ul>" + "".join(f"<li>{esc(n)}</li>" for n in applied_notes) + "</ul>"
     err_html = ("<p class='fail'>Live fetch failed for: " + ", ".join(f"{k} ({esc(str(v)[:80])})" for k, v in errs.items()) + ". Those inputs are carried from inputs.json.</p>") if errs else ""
+    err_html += "".join(f"<p class='fail'><b>WARNING:</b> {esc(wn)}</p>" for wn in out.get("warnings", []))
     watch_items = []
     for line in adj_lines:
         if line in mm.CAPEX_LINE_ALIASES:
@@ -618,7 +651,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     payload = chart_payload(model, out, tables, inputs)
     nav = [("call", "The call"), ("argument", "The argument"), ("model", "Financial model"), ("valuation", "Valuation"),
            ("sens", "Sensitivities"), ("inputs", "Assumptions"), ("monitor", "Monitor"), ("sources", "Sources")]
-    nav_html = "".join(f"<a href='#{i}'>{t}</a>" for i, t in nav)
+    nav_html = "".join(f"<a href='#{i}'>{t}</a>" for i, t in nav) + "<a href='thesis.html'>Thesis tracker →</a>"
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

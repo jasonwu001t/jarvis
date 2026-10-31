@@ -2,7 +2,7 @@
 
 What it refreshes automatically (official / exchange sources through atlas, http://127.0.0.1:8000):
   price            latest daily close (alpaca.stock_bars)             -> market.price
-  risk-free rate   10-year Treasury, FRED DGS10                        -> wacc.risk_free   (if wacc.risk_free_mode == "dgs10")
+  risk-free rate   10-year Treasury par yield (treasury.yield_curve), FRED DGS10 fallback -> wacc.risk_free (if wacc.risk_free_mode == "dgs10")
   beta             2-year weekly raw beta vs SPY, Bloomberg-adjusted   -> wacc.beta        (if wacc.beta_mode == "adjusted_2y_weekly")
   fundamentals     SEC XBRL KPIs by fiscal quarter (sec.company_facts) -> new-quarter detection, actual vs consensus table
   earnings date    Nasdaq calendar via atlas
@@ -32,6 +32,8 @@ import valuation_engine as mm  # noqa: E402
 import report_html  # noqa: E402
 import overlays  # noqa: E402
 import guidance as guid  # noqa: E402
+import thesis_tracker  # noqa: E402
+import atlas_data  # noqa: E402
 
 
 def _dir(argv):
@@ -49,7 +51,7 @@ KPI_TO_LINE = {
     "income_tax_expense": "income_tax", "net_income": "net_income", "shares_diluted": "diluted_shares",
     "dividends_per_share": "dps", "dividends_paid": "dividends_total", "buybacks": "buybacks",
     "depreciation_amortization": "d_and_a", "share_comp": "sbc", "operating_cash_flow": "operating_cash_flow",
-    "capex": "capex", "finance_lease_additions": "finance_lease_additions", "cash": "cash",
+    "capex": "capex", "finance_lease_additions": "finance_lease_additions", "cash": "cash", "gross_profit": "gross_profit",
     "total_debt": "total_debt", "equity": "equity", "eps_diluted": "gaap_eps",
 }
 PER_SHARE = {"dividends_per_share", "eps_diluted"}
@@ -78,8 +80,15 @@ def live_price(ticker: str) -> dict:
 
 
 def live_dgs10() -> dict:
+    """10-year yield: the Treasury's own par curve first (official, same-day), FRED DGS10 as the fallback (one day behind)."""
+    try:
+        yc = get("/api/v1/macro/yield-curve")["data"]
+        if yc.get("10 Yr") is not None and yc.get("Date"):
+            return {"value": float(yc["10 Yr"]) / 100, "date": yc["Date"], "source": "treasury.yield_curve"}
+    except Exception:  # noqa: BLE001 - fall through to FRED
+        pass
     rows = get("/api/v1/macro/series/DGS10", limit=1)["data"]["rows"]
-    return {"value": float(rows[0]["value"]) / 100, "date": rows[0]["as_of_date"]}
+    return {"value": float(rows[0]["value"]) / 100, "date": rows[0]["as_of_date"], "source": "fred.DGS10"}
 
 
 def weekly_closes(ticker: str, limit: int = 560) -> dict[dt.date, float]:
@@ -109,27 +118,9 @@ def live_beta(ticker: str, bench: str = "SPY", weeks: int = 104) -> dict:
 
 
 def live_kpis(ticker: str) -> dict[str, dict]:
-    """{kpi id: {period key: value}} from atlas's XBRL KPI table, in USD millions (per-share and shares as is / millions)."""
-    kpis = get(f"/api/v1/filings/ticker/{ticker}", top_n=1)["data"]["xbrl"]["kpis"]
-    out = {}
-    for k in kpis:
-        series = {}
-        for row in k.get("quarterly", []) + k.get("annual", []):
-            v = row["value"]
-            if v is None:
-                continue
-            if k["id"] in PER_SHARE:
-                pass
-            elif k["id"] in SHARES:
-                v = v / 1e6
-            else:
-                v = v / 1e6
-            try:
-                key = period_key(row["period"])
-            except ValueError:            # a balance on no fiscal period is labelled by its date
-                continue
-            series[key] = {"value": v, "end": row["end"], "filed": row.get("filed"), "form": row.get("form")}
-        out[k["id"]] = series
+    """{kpi id: {period key: value}} from atlas's /research/fundamentals in USD millions (IFRS filers converted by atlas;
+    per-share values per listed share, share counts in millions of listed-share equivalents)."""
+    out = atlas_data.fundamentals(ticker, currency="USD")["kpis"]
     return out
 
 
@@ -182,6 +173,33 @@ def live_closes(ticker: str, limit: int = 320) -> dict:
     return {r["as_of_date"]: float(r["close"]) for r in get(f"/api/v1/market/prices/{ticker}", limit=limit)["data"]["rows"]}
 
 
+MATERIAL_ITEMS = ("1.01", "1.02", "2.01", "2.03", "2.05", "2.06", "3.02", "5.02", "8.01")
+
+
+def live_filings(ticker: str, limit: int = 400) -> dict:
+    """Recent material filings: sec.filing_events through atlas (8-K items with headlines and exhibit URLs, 6-Ks),
+    falling back to the bare filings index (sec.submissions) when the events dataset has nothing for the ticker."""
+    try:
+        ev = atlas_data.events(ticker, limit=limit)
+        if ev["rows"]:
+            ev["material_items"] = list(MATERIAL_ITEMS)
+            return ev
+    except atlas_data.NotCollected:
+        pass
+    d = get("/api/v1/data/datasets/sec.submissions/rows", **{"eq.ticker": ticker, "limit": limit})["data"]
+    cols = [c["name"] for c in d["columns"]]
+    rows = [dict(zip(cols, r)) if isinstance(r, list) else r for r in d["rows"]]
+    out = []
+    for r in rows:
+        if r.get("form") not in ("8-K", "8-K/A", "6-K"):
+            continue
+        items = [x.strip() for x in str(r.get("items") or "").split(",") if x.strip()]
+        out.append({"date": r["filing_date"], "form": r["form"], "items": items, "accession": r["accession_number"],
+                    "url": r.get("primary_doc_url"), "knowledge_time": r.get("knowledge_time")})
+    out.sort(key=lambda x: (x["date"], x["knowledge_time"] or ""), reverse=True)
+    return {"rows": out, "n": len(out), "material_items": list(MATERIAL_ITEMS), "source": "sec.submissions via atlas (fallback)"}
+
+
 def live_insider(ticker: str) -> dict:
     d = get(f"/api/v1/filings/ticker/{ticker}", top_n=5)["data"]["insider"]
     flow = d.get("monthly_flow", [])[-3:]
@@ -190,10 +208,18 @@ def live_insider(ticker: str) -> dict:
 
 
 def live_guidance(inputs: dict, folder: str) -> dict:
-    """Latest press-release outlook (revenue next quarter, capex and expenses full year), via guidance.py (EDGAR, cached)."""
-    rows = guid.collect(inputs["company"].get("filing_ticker") or inputs["company"]["ticker"], folder, since=(dt.date.today() - dt.timedelta(days=200)).isoformat())
-    rows = [r for r in rows if r.get("parsed")]
-    return rows[-1] if rows else {}
+    """Latest release's guidance (revenue / operating income next quarter, capex and expenses full year): sec.earnings_guidance
+    through atlas first; guidance.py's regexes over the cached exhibits only when atlas has nothing (and says so)."""
+    t = inputs["company"].get("filing_ticker") or inputs["company"]["ticker"]
+    since = (dt.date.today() - dt.timedelta(days=200)).isoformat()
+    try:
+        rows = atlas_data.guidance_releases(t, since=since)
+        if rows:
+            return {**rows[-1], "source": "sec.earnings_guidance via atlas"}
+    except atlas_data.NotCollected:
+        pass
+    rows = [r for r in guid.collect(t, folder, since=since) if r.get("parsed")]
+    return {**rows[-1], "source": "guidance.py regexes (fallback)"} if rows else {}
 
 
 def extend_history(inputs: dict, kpis: dict, back_years: int = 4) -> dict:
@@ -275,7 +301,8 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
         for p in inputs["periods"]:
             if int(p["key"]) == key:
                 p["status"] = "actual"
-        notes.append(f"{key}: segment lines (Family of Apps / Advertising / Other Revenue / Reality Labs) must be keyed in from the press release")
+        if inputs.get("segments"):
+            notes.append(f"{key}: segment lines ({' / '.join(inputs['segments'])}) come from the next fill (atlas segment facts) or the press release")
         end = kpis["revenue"][key]["end"]
         inputs["as_of"]["latest_reported_fy"], inputs["as_of"]["latest_reported_q"] = key // 10, key % 10
         inputs["as_of"]["balance_sheet_date"] = end
@@ -341,6 +368,17 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     e = live.get("earnings") or {}
     if e.get("report_date"):
         L.append(f"Next earnings: **{e['report_date']}** ({e.get('time_of_day')}, {e.get('fiscal_quarter')}), Nasdaq EPS consensus {e.get('eps_consensus_nasdaq')}")
+    cn = (live.get("consensus") or {}).get("next") or {}
+    if cn.get("latest"):
+        ch = cn.get("change") or {}
+        L.append(f"EPS consensus history ({cn['report_date']}, exchange source): {cn['latest'].get('eps_forecast')} on {cn['latest'].get('estimates')} estimates; "
+                 f"{cn.get('revisions', 0)} revision(s) over {cn.get('captures', 0)} captures since {str(cn['first'].get('captured_at', ''))[:10]}"
+                 + (f"; {ch['days']}-day change {ch['delta']:+.2f} ({ch['pct']:+.1%})" if ch.get("pct") is not None else ""))
+    if out.get("warnings"):
+        L.append("")
+        L.append("## Warnings")
+        L.append("")
+        L.extend(f"- **WARNING:** {wn}" for wn in out["warnings"])
     L.append("")
     L.append("## Targets (12 months forward, per share)")
     L.append("")
@@ -387,7 +425,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
     g = live.get("guidance") or {}
     if g.get("parsed"):
         L.append("")
-        L.append(f"## Company guidance ({g['date']} press release) vs the model")
+        L.append(f"## Company guidance ({g['date']} press release, {g.get('source', 'guidance.py')}) vs the model")
         L.append("")
         rv, cx = g.get("revenue_next_quarter"), g.get("capex_full_year")
         if rv:
@@ -405,11 +443,22 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         L.append(f"## Insider flow (Forms 4, {', '.join(l3['months'])})")
         L.append("")
         L.append(f"- Open-market buys ${l3['form4_buy'] / 1e6:,.1f}m, sells ${l3['form4_sell'] / 1e6:,.1f}m; informational (programme sales dominate at large caps).")
+    fl = live.get("filings") or {}
+    if fl.get("rows"):
+        since = (dt.date.today() - dt.timedelta(days=120)).isoformat()
+        mat = [r for r in fl["rows"] if r["date"] >= since and (r["form"] == "6-K" or set(r["items"]) & set(MATERIAL_ITEMS))][:12]
+        L.append("")
+        L.append(f"## Material filings (8-K items {', '.join(MATERIAL_ITEMS)}; 6-Ks) since {since}")
+        L.append("")
+        for r in mat:
+            L.append(f"- {r['date']} {r['form']} {', '.join(r['items']) or '—'}" + (f" · {r['headline'][:140]}…" if r.get('headline') else "") + f" · {r['url']}")
+        if not mat:
+            L.append("- none")
     L.append("")
     L.append("## Live inputs")
     L.append("")
     b = live.get("beta") or {}
-    L.append(f"- Risk-free (10y UST, {live.get('dgs10', {}).get('date', 'manual')}): {inputs['wacc']['risk_free']:.2%}"
+    L.append(f"- Risk-free (10y UST, {live.get('dgs10', {}).get('date', 'manual')}, {live.get('dgs10', {}).get('source', 'keyed')}): {inputs['wacc']['risk_free']:.2%}"
              + (f" (baseline {base['risk_free']:.2%})" if base.get('risk_free') is not None else ""))
     L.append(f"- Beta: {inputs['wacc']['beta']:.3f}" + (f" (raw 2y weekly vs SPY {b['raw']:.3f}, n={b['n_weeks']}, {b['from']}..{b['to']}" + (f"; baseline {base['beta']:.3f}" if base.get('beta') is not None else "") + ")" if b else " (manual)"))
     L.append(f"- Cost of equity {w['cost_of_equity']:.2%}, after-tax cost of debt {w['after_tax_cost_of_debt']:.2%} (TTM tax {w['ttm_tax_rate']:.1%}), "
@@ -494,7 +543,8 @@ def main(argv: list[str]) -> int:
             live["earnings"] = live_earnings(ft)
         except Exception as exc:  # noqa: BLE001
             live["earnings"] = {"error": str(exc)}
-        for name, fn in (("macro", lambda: live_macro()), ("closes", lambda: live_closes(t)), ("insider", lambda: live_insider(ft)),
+        for name, fn in (("macro", lambda: live_macro()), ("closes", lambda: live_closes(t)), ("insider", lambda: live_insider(ft)), ("filings", lambda: live_filings(ft)),
+                         ("consensus", lambda: atlas_data.consensus_history(ft)),
                          ("guidance", lambda: live_guidance(inputs, HERE))):
             try:
                 live[name] = fn()
@@ -527,8 +577,14 @@ def main(argv: list[str]) -> int:
     for p in (hp, os.path.join(HERE, "reports", "latest.html")):
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(page)
+    try:
+        tp = thesis_tracker.run(inputs, model_inputs, out, live, HERE, rules(inputs, out))
+    except Exception as exc:  # noqa: BLE001 - the tracker never blocks the report
+        tp = None
+        print(f"[thesis tracker failed: {exc!r}]", file=sys.stderr)
     print(report)
-    print(f"\n[written {os.path.relpath(rp, os.getcwd())}, {os.path.relpath(hp, os.getcwd())}, {os.path.relpath(os.path.join(HERE, 'reports', 'latest.html'), os.getcwd())}]", file=sys.stderr)
+    print(f"\n[written {os.path.relpath(rp, os.getcwd())}, {os.path.relpath(hp, os.getcwd())}, {os.path.relpath(os.path.join(HERE, 'reports', 'latest.html'), os.getcwd())}"
+          + (f", {os.path.relpath(tp, os.getcwd())}" if tp else "") + "]", file=sys.stderr)
     errs = {k: v for k, v in live.items() if isinstance(v, dict) and "error" in v}
     if errs:
         print(f"[live fetch errors: {errs}]", file=sys.stderr)

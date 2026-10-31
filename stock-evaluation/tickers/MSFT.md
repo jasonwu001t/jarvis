@@ -68,3 +68,4 @@ promise withdrawn or FY2027 capex >10% above the path.
 ## Log
 
 - 2026-10-23: built on the 美投 exit-P/E method, reproducing 493/598/689; narrative from five 美投 pieces.
+- 2026-10-25: the checks now use the deferred-revenue rule (detected: median working-capital build -1.3% of revenue, FY2022-26, the unearned-revenue model): a working-capital release is not counted against the reinvestment checks; declare `company.business_model: "standard"` to switch it off. Monitor rerun: 493 / 598 / 689 unchanged.

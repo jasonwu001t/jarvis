@@ -47,8 +47,10 @@ path for two quarters at >33% segment margin. Downgrade by: MI400 shipments slip
 - `segments.py`: parses the 2025+ release table ("Net Revenue: Data Center Segment … Operating Income (Loss) …")
   into Data Center, Client and Gaming (Client + Gaming), Embedded with segment operating income; older releases
   fall back to sentence matching. Applied by hand to the cached exhibits (the fill's segment hook also works).
-- D&A: XBRL `Depreciation` (FY) + `AmortizationOfIntangibleAssets` (YTD, de-cumulated); FY2024 amortisation keyed
-  at ~$2.4bn. Working capital recomputed as NOPAT + D&A + SBC − OCF after D&A is in.
+- D&A: XBRL `OtherDepreciationAndAmortization` (the cash-flow "Depreciation and amortization" line: PP&E, ROU and
+  other; FY2025 $750m) + `AmortizationOfIntangibleAssets` (FY2025 $2,300m), both YTD and de-cumulated. **Not**
+  `Depreciation` (PP&E only, $521m), which understated D&A by ~$230m a year until the 2026-10-24 fact-check.
+  `DepreciationDepletionAndAmortization` stops in 2023. Working capital recomputed as NOPAT + D&A + SBC − OCF.
 - Guidance wording: "For the third quarter of 2026, AMD expects revenue to be approximately $13 billion, plus or minus
   $300 million … Non-GAAP gross margin is expected to be approximately 56%." No `guidance.py` pattern yet; keyed by
   hand.
@@ -67,3 +69,11 @@ path for two quarters at >33% segment margin. Downgrade by: MI400 shipments slip
 
 - 2026-10-23: quick model (guidance street: 155/274/457), then full build on the company's long-term model
   (196/408/674) with narrative and segments.
+- 2026-10-23: narrated valuation video (`video/slides.py` → `amd_valuation_2026-10-23.mp4`, 11.8 min, 14 slides) in the 美投 format.
+- 2026-10-24: thesis tracker added (13 claims in `thesis.claims`: Data Center growth/margin, operating margin and Embedded auto-scored from the lines; ramp, Q4 guide, anchors, CPU, Nvidia, ASICs, dilution, export manual; price risk from the Stretched rule); daily cron `job ticker-monitor AMD` 07:05 weekdays prepared in AlphaResearch (owner installs).
+- 2026-10-24: fact-check against SEC XBRL, the press releases and the 8-Ks (`source/factcheck_2026-10-24.md`): all P&L, cash-flow, share and segment values verified; D&A history corrected (tag mix); FAD targets re-cited to the SEC-filed ARS of 2026-03-27.
+- 2026-10-24: skill-side fixes: `gross_profit` line (XBRL GrossProfit) and a GAAP gross-margin claim (≥53%, the 56% non-GAAP guide less SBC and amortisation in cost of sales); the 10-year now comes from the Treasury par curve the same day (5.00% on 10-23 vs FRED 4.96% on 10-22, house 408 → 406); the tracker records and flags the price, yield and beta dates.
+- 2026-10-25: claims gain `target_vs_model` (FAD targets from `source/company_targets.json`, via the ARS) and `filing_event` (anchors on 8-K 1.01/1.02, dilution on 3.02, read from sec.submissions through atlas); the report and tracker list material filings of the last 120 days.
+- 2026-10-25: `segments.py` removed; the segment lines come from atlas's segment facts (members Data Center, Client and Gaming, Embedded). Parity: 2025–26 quarters identical; 2024 within 1.5% (press-release sentences were rounded); 2022–23 the old sentence parser had misread two quarters, atlas is right. Guidance now from `sec.earnings_guidance` (11 releases; the regexes never matched AMD's wording). Events from `sec.filing_events` with headlines.
+- 2026-10-25: `consensus_revision` claim (Nasdaq EPS consensus 1.64 → 1.68 over 30 days, 4 revisions, 13 estimates for 2026-11-03).
+- 2026-10-25: the report's model table now shows the Data Center / Client and Gaming / Embedded rows from the `segments` block (skill fix: the rows were META's); checks name their rule (standard). Monitor rerun: 195 / 406 / 671 unchanged.

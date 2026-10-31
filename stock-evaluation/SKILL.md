@@ -27,10 +27,15 @@ same engine and report and adds its own playbook.
    keyed in and date-stamped. Say plainly which inputs are manual and how old they are.
 4. **Build or update the ticker folder** `~/AlphaResearch/research/<TICKER>/`:
    - new ticker: `python3 scripts/new_ticker.py <TICKER> "<Company name>" --dir ~/AlphaResearch/research/<TICKER>`
-     scaffolds `inputs.json`; then `python3 scripts/fill_from_atlas.py --dir … --since-fy <FY>` fills the
-     XBRL history, balance-sheet composites, segments (when the folder has a `segments.py` that parses
-     the company's press-release sentences; AMZN is the pattern) and a guidance street for the forecast
-     periods (next-quarter ranges from the press release, beat-adjusted, fading to trend). Then set the
+     scaffolds `inputs.json` (with two generic claims); then `python3 scripts/fill_from_atlas.py --dir … --since-fy <FY>`
+     fills the history (US GAAP or IFRS, in USD, per listed share), balance-sheet composites, business segments
+     from atlas's segment facts and a guidance street from `sec.earnings_guidance` (next-quarter ranges,
+     beat-adjusted, fading to trend, the extrapolated growth capped at ±50% a year by `--growth-cap`; after a
+     Q4 the reported year stays as filed and the street starts at the guided Q1; other income = net interest
+     at the last four quarters' rates on the carried cash and debt; working capital reverting from its TTM
+     share to the historical median by FY+2). The ticker must be on an atlas list; nothing is per company. A folder's
+     `segments.py` or `guidance.py`'s regexes are fallbacks only, and the fill records which source it used in
+     `_sources` (`references/data-sources.md`). Then set the
      scenario anchors from the company's own history, the adjustments that encode the thesis, the thesis
      summary and rating (see `references/inputs-schema.md`). Replace the street with real consensus when
      you have it; the report labels it until you do;
@@ -39,16 +44,21 @@ same engine and report and adds its own playbook.
      the report renders a generic method walkthrough.
 5. **Run** `python3 scripts/monitor.py --dir ~/AlphaResearch/research/<TICKER>` (`--offline` without
    atlas). Read the summary the engine prints and the check list; a failed check means an input is
-   wrong, not that the stock is. `reports/latest.html` is the deliverable: open it and look at it
-   before handing it over.
+   wrong, not that the stock is (the ROIC and reinvestment checks say which rule they used: standard,
+   cyclical or deferred revenue, from `company.business_model` or detected). WARNING lines mean the engine
+   filled something in (a P/E leg off for a negative or near-zero earnings base, a cost of debt from
+   risk-free + spread): say so when you report back. `reports/latest.html` is the deliverable: open it
+   and look at it before handing it over.
 6. **Report back** with the call, not the mechanics: price versus bear / base / bull, the house target
    and upside, the probability-weighted exposure after the overlays, what the price implies (reverse
    DCF), how the company's own guidance compares with the consensus block, what the next print has to
    show, and which manual inputs the number depends on. Point at the HTML.
-7. **Keep it alive.** `references/monitoring.md` covers the daily protocol, the rules, rolling a newly
-   filed quarter with `--apply-actuals`, and scheduling (the META job in AlphaResearch's crontab is the
+7. **Keep it alive.** `references/monitoring.md` covers the daily protocol, the rules, the thesis tracker
+   (`thesis.claims` in inputs.json → `reports/thesis.html`), rolling a newly filed quarter with `--apply-actuals`, and scheduling (the META job in AlphaResearch's crontab is the
    pattern). After an earnings print, re-underwrite: actuals versus the consensus the model carried,
-   then the segment split and a fresh consensus block.
+   then the segment split and a fresh consensus block. Across tickers, `scripts/digest.py` renders
+   `~/AlphaResearch/research/_digest/index.html` after the daily monitors: one table over every folder,
+   what moved since the last run, the exposure view and the claims due (monitoring.md, "Digest").
 8. **Write the playbook.** Finish a new ticker by writing `tickers/<TICKER>.md` from the template so
    the next evaluation starts from what was learned.
 
@@ -84,6 +94,11 @@ price, yield, flows and the multiple. Note the choice in the playbook.
 | `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter. |
 | `scripts/new_ticker.py` | Scaffold a ticker folder with a commented `inputs.json`. |
 | `scripts/fill_from_atlas.py` | Fill a ticker's history, balance composites, segments (via the folder's `segments.py`) and a guidance street from atlas and the press releases. |
+| `scripts/make_video.py` | Narrated slide video in the 美投 valuation-video format (headless Chrome slides + Kokoro neural TTS via `kokoro_tts.py` (or macOS `say`) + ffmpeg, burnt-in subtitles, loudness-normalised); a ticker's `video/slides.py` defines the slides and narration from `inputs.json` and the engine (first use: research/AMD). |
+| `scripts/thesis_tracker.py` | Daily thesis tracker (`reports/thesis.html`, `reports/history.jsonl`): claims board scored on the latest filed quarter, what changed since the last run, assumption-impact tornado with break-evens, target history. Called by monitor.py. |
+| `scripts/digest.py` | The page across tickers (`research/_digest/index.html`): summary table with links to each report and tracker, what moved since the last run, recommended exposure and expected-value upside per ticker with the ten-slot book share, claims due in 30 days. Reads each folder's inputs.json, last two history records and the run's markdown report; `scripts/tests/test_digest.py`. |
+| `scripts/tests/` | `python3 -m unittest discover -s scripts/tests` (or pytest) from the skill root: the digest, and `test_onboarding_faults.py` for the nine faults the 2026-10-25 onboardings found (fill street after a Q4, growth cap, other income, working capital; P/E leg off on a loss base; cost-of-debt fallback; scaffold rules; segment rows; company-type checks; zero-threshold claims) on synthetic companies (`tests/_synth.py`). Python 3.9 and later. |
+| `scripts/atlas_data.py` | The one atlas client: fundamentals in USD per listed share, segment facts, guidance releases, filing events; raises `NotCollected` on a 404 so callers fall back loudly. |
 | `scripts/backtest.py` | Point-in-time backtest: rebuild the model at each earnings release + lag days under several streets and sizing variants, compare with buy-and-hold and SPY (see `references/monitoring.md`). |
 | `scripts/guidance.py` | Company guidance (next-quarter revenue, full-year capex and expenses) parsed from the 8-K press-release exhibit, cached per release. |
 | `scripts/overlays.py` | Market-risk overlays on the valuation signal: regime gate (NFCI, VIX, Baa spread), volatility scaling, trend staging. |

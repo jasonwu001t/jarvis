@@ -16,12 +16,15 @@ import calendar
 import copy
 import datetime as dt
 import json
+import statistics
 import sys
 
 SCENARIOS = ("bear", "base", "bull")
 CAPEX_LINE_ALIASES = {"资本开支", "Capex", "capex", "Capital expenditure"}
 REVENUE_LINE_ALIASES = {"总收入", "Revenue", "revenue", "Total revenue"}
 MARGIN_LINE_ALIASES = {"营业利润率", "Operating margin", "operating_margin"}
+DEFAULT_DEBT_SPREAD = 0.015      # pretax cost of debt = risk-free + this when wacc.pretax_cost_of_debt is null (wacc.debt_spread overrides)
+DEFAULT_PE_MIN_NET_MARGIN = 0.01 # the P/E leg is off for a scenario whose quarters 5-8 net income is at or below this share of revenue
 
 
 def _d(s: str) -> dt.date:
@@ -216,6 +219,11 @@ class Model:
         for a, b in zip(yrs[:-1], yrs[1:]):
             e["implied_return_on_new_investment"][a] = (nop[b] - nop[a]) / reinv[a] if reinv[a] > 0 else None
         e["implied_return_on_new_investment"][last] = (e["terminal_nopat"] - nop[last]) / reinv[last] if reinv[last] > 0 else None
+        # the checks' cyclical rule: what the transition's reinvestment earns once margins are back at the steady (mid-cycle)
+        # level, i.e. revenue added x steady margin after tax per dollar reinvested; equals steady ROIC in a steady state
+        tot = sum(reinv.values())
+        rev_end = (e["revenue"][last] if self.years_ext else rev2) * (1 + g)
+        e["implied_return_through_cycle"] = (rev_end - rev2) * m_ss * (1 - t_ss) / tot if tot > 0 else None
         return e
 
     # ------------------------------------------------------------------- WACC
@@ -230,13 +238,19 @@ class Model:
         pre = sum(self.v("pretax_income", k) for k in last4)
         tax = sum(self.v("income_tax", k) for k in last4)
         t_ttm = 0.0 if pre <= 0 else min(1.0, max(0.0, tax / pre))
-        kd = W["pretax_cost_of_debt"] * (1 - t_ttm)
+        kd_pre, kd_src = W.get("pretax_cost_of_debt"), "inputs"
+        if kd_pre is None:
+            # no stated rate (a fresh fill, a no-debt filer): the risk-free rate plus a stated spread, said out loud
+            spread = W.get("debt_spread", DEFAULT_DEBT_SPREAD)
+            kd_pre, kd_src = W["risk_free"] + spread, f"risk-free + {spread:.2%} spread (wacc.pretax_cost_of_debt is null)"
+        kd = kd_pre * (1 - t_ttm)
         we = mcap / (mcap + debt)
         wacc = we * ke + (1 - we) * kd
         if W.get("mode") == "manual" and W.get("value") is not None:
             wacc = W["value"]            # e.g. the average of Bloomberg's and FactSet's WACC, as the 美投 AMZN video does
         return {"cost_of_equity": ke, "market_cap": mcap, "debt": debt, "weight_equity": we, "weight_debt": 1 - we,
-                "ttm_tax_rate": t_ttm, "after_tax_cost_of_debt": kd, "wacc": wacc, "computed_wacc": we * ke + (1 - we) * kd, "mode": W.get("mode", "capm")}
+                "ttm_tax_rate": t_ttm, "pretax_cost_of_debt": kd_pre, "cost_of_debt_source": kd_src,
+                "after_tax_cost_of_debt": kd, "wacc": wacc, "computed_wacc": we * ke + (1 - we) * kd, "mode": W.get("mode", "capm")}
 
     # -------------------------------------------------------------------- DCF
     def dcf(self, scn: str, s: dict, e: dict, w: dict) -> dict:
@@ -341,17 +355,24 @@ class Model:
             W = self.i["wacc"]
             mult = mult * (ra.get("rf_ref", 0.05) + W["erp"]) / (W["risk_free"] + W["erp"])
         target = ni * mult / sh * fx
+        # a negative or near-zero earnings base makes the multiple meaningless: the leg is off and blend_target gives its weight to the DCF
+        rev = w * s["revenue"][self.fy1] + (1 - w) * s["revenue"][self.fy2]
+        net_margin = ni / rev if rev else None
+        disabled = net_margin is None or net_margin <= self.i["blend"].get("pe_min_net_margin", DEFAULT_PE_MIN_NET_MARGIN)
+        raw_target, target = target, (None if disabled else target)
         price = self.i["market"]["price"]
         eps1 = s[ni_line][self.fy1] / s["diluted_shares"][self.fy1] * fx
         eps2 = s[ni_line][self.fy2] / s["diluted_shares"][self.fy2] * fx
         return {"weight_fy1": w, "q5_q8_net_income": ni, "q5_q8_shares": sh, "q5_q8_eps": ni / sh * fx, "target_multiple": mult, "stated_multiple": S["target_multiple"],
-                "target": target, "implied_pe_fy1": target / eps1 if eps1 else None, "implied_pe_fy2": target / eps2 if eps2 else None,
+                "target": target, "raw_target": raw_target, "disabled": disabled, "q5_q8_net_margin": net_margin, "basis": basis,
+                "implied_pe_fy1": target / eps1 if (eps1 and target is not None) else None, "implied_pe_fy2": target / eps2 if (eps2 and target is not None) else None,
                 "price_implied_multiple": price / fx * sh / ni if ni else None, "eps_fy1": eps1, "eps_fy2": eps2}
 
     # -------------------------------------------------------------- top level
     # ------------------------------------------------------- returns on capital
-    def incremental_roic(self, years: int = 2) -> dict:
-        """Realised return on the capital added over the last `years`: ΔNOPAT(TTM) / Σ(capex + leases − D&A), reported quarters only."""
+    def incremental_roic(self, years: int = 2, floor_wc: bool = False) -> dict:
+        """Realised return on the capital added over the last `years`: ΔNOPAT(TTM) / Σ(capex + leases − D&A + working capital),
+        reported quarters only; floor_wc counts a working-capital release as zero (the checks' deferred-revenue rule)."""
         qs = sorted(int(p["key"]) for p in self.periods if p["q"] != 0 and p["status"] == "actual" and int(p["key"]) <= self.latest_key)
         n = 4 * years
         if len(qs) < n + 4:
@@ -366,7 +387,8 @@ class Model:
         now, then = qs[-4:], qs[-4 - n:-n]
         d_nopat = sum(nopat(k) for k in now) - sum(nopat(k) for k in then)
         window = qs[-n:]
-        reinvest = sum(self.v("capex", k) + self.v("finance_lease_additions", k) - self.v("d_and_a", k) + self.v("wc_increase", k) for k in window)
+        wc = (lambda k: max(0.0, self.v("wc_increase", k))) if floor_wc else (lambda k: self.v("wc_increase", k))
+        reinvest = sum(self.v("capex", k) + self.v("finance_lease_additions", k) - self.v("d_and_a", k) + wc(k) for k in window)
         return {"incremental_roic": d_nopat / reinvest if reinvest > 0 else None, "nopat_ttm": sum(nopat(k) for k in now),
                 "nopat_ttm_prior": sum(nopat(k) for k in then), "net_reinvestment": reinvest, "years": years,
                 "window": [window[0], window[-1]]}
@@ -425,7 +447,10 @@ class Model:
                 "steady_roic": self._solve(w["wacc"] + 0.005, 1.5, lambda x: dcf_with("steady_roic", x), price),
                 "note": "growth_pp: percentage points added to consensus growth in every forecast period (house adjustments kept) so the base blended target equals the price; margin and ROIC: the base steady-state value at which the base DCF equals the price"}
 
-    def blend_target(self, dcf_target: float, pe_target: float) -> float:
+    def blend_target(self, dcf_target: float, pe_target: float | None) -> float:
+        """dcf_weight x DCF + the rest x P/E; a disabled P/E leg (None) hands its weight to the DCF."""
+        if pe_target is None:
+            return dcf_target
         dw = self.i["blend"]["dcf_weight"]
         return dw * dcf_target + (1 - dw) * pe_target
 
@@ -433,14 +458,22 @@ class Model:
         w = self.wacc()
         anchor = self.anchor_roic(w)
         out = {"inputs_as_of": self.i["as_of"], "price": self.i["market"]["price"], "wacc": w, "scenarios": {},
-               "returns": {**self.incremental_roic(), "steady_roic_base": self.i["scenarios"]["base"]["steady_roic"], "anchor": anchor}}
+               "returns": {**self.incremental_roic(), "steady_roic_base": self.i["scenarios"]["base"]["steady_roic"], "anchor": anchor},
+               "warnings": []}
+        if w["cost_of_debt_source"] != "inputs":
+            out["warnings"].append(f"No pretax cost of debt in inputs.json: the WACC uses {w['pretax_cost_of_debt']:.2%} = {w['cost_of_debt_source']}")
         for scn in SCENARIOS:
             s = self.scenario_series(scn)
             e = self.extrapolate(scn, s)
             d = self.dcf(scn, s, e, w)
             m = self.multiples(scn, s)
             dw = self.i["blend"]["dcf_weight"]
-            blended = dw * d["target"] + (1 - dw) * m["target"]
+            blended = self.blend_target(d["target"], m["target"])
+            if m["disabled"]:
+                out["warnings"].append(
+                    f"{scn}: P/E leg disabled: quarters 5-8 {m['basis']} net income {m['q5_q8_net_income']:,.0f} is "
+                    + (f"{m['q5_q8_net_margin']:.1%} of revenue" if m["q5_q8_net_margin"] is not None else "on no revenue")
+                    + f" (floor {self.i['blend'].get('pe_min_net_margin', DEFAULT_PE_MIN_NET_MARGIN):.0%}); its {1 - dw:.0%} weight moved to the DCF")
             rev25 = self.v("revenue", (self.fy - 1) * 10)
             k30 = (self.fy + 4) * 10
             rev30 = s["revenue"][k30] if k30 in s["revenue"] else e["revenue"].get(k30)
@@ -451,14 +484,19 @@ class Model:
                                                                / (m["weight_fy1"] * s["revenue"][self.fy1] + (1 - m["weight_fy1"]) * s["revenue"][self.fy2])}
         p = self.i["blend"]["target_position"]
         b, ba, bu = (out["scenarios"][k] for k in SCENARIOS)
-        lerp = lambda lo, mid, hi: mid + p * (hi - mid) if p >= 0 else mid + p * (mid - lo)
+
+        def lerp(lo, mid, hi):   # None (a disabled P/E leg) where the position needs it
+            if p == 0 or mid is None:
+                return mid
+            far = hi if p > 0 else lo
+            return None if far is None else (mid + p * (far - mid) if p > 0 else mid + p * (mid - far))
         house = {"position": p,
                  "dcf_target": lerp(b["dcf"]["target"], ba["dcf"]["target"], bu["dcf"]["target"]),
                  "multiples_target": lerp(b["multiples"]["target"], ba["multiples"]["target"], bu["multiples"]["target"]),
                  "target": lerp(b["blended_target"], ba["blended_target"], bu["blended_target"])}
         house["upside"] = house["target"] / self.i["market"]["price"] - 1
         ni_h = lerp(b["multiples"]["q5_q8_net_income"], ba["multiples"]["q5_q8_net_income"], bu["multiples"]["q5_q8_net_income"])
-        house["implied_multiple"] = house["multiples_target"] * ba["multiples"]["q5_q8_shares"] / ni_h if ni_h else None
+        house["implied_multiple"] = house["multiples_target"] * ba["multiples"]["q5_q8_shares"] / ni_h if (ni_h and house["multiples_target"] is not None) else None
         out["house"] = house
         # probability-weighted value and a position size from reward to risk
         S = self.i["scenarios"]
@@ -618,26 +656,90 @@ class Model:
         # year-over-year growth for every flow row with a comparable period
         for row in ("revenue", "operating_income", "pretax_income", "net_income", "adjusted_net_income", "eps", "adjusted_eps",
                     "dps", "dividends_total", "d_and_a", "sbc", "operating_cash_flow", "capex", "ebitda", "diluted_shares",
-                    "seg:Family of Apps", "seg:Advertising", "seg:Other Revenue", "seg:Reality Labs"):
+                    *(self.segment_line(seg) for seg in self.i["segments"])):
             for k, v in list(T.get(row, {}).items()):
                 p = T.get(row, {}).get(k - 10)
                 if p:
                     put(f"yoy:{row}", k, v / p - 1)
         return T
 
+    # ------------------------------------------------------------- company type
+    def reported_years(self) -> list[int]:
+        """Fiscal-year keys of the reported years in the lines (history before the periods included)."""
+        last = self.fy if self.q == 4 else self.fy - 1
+        return sorted(k for k in map(int, self.L.get("revenue", {})) if k % 10 == 0 and k // 10 <= last and self.v("revenue", k))
+
+    def business_model(self) -> dict:
+        """What the ROIC and reinvestment checks need to know about the company: company.business_model when declared
+        ("standard", "cyclical", "deferred_revenue" or a list of them), otherwise detected from the reported fiscal years:
+        cyclical when revenue fell 15% or more in a year, deferred revenue when the median working-capital build is below
+        -1% of revenue (customers fund the growth: deferred revenue, prepayments, supplier float)."""
+        decl = self.i["company"].get("business_model")
+        if decl:
+            types = {decl} if isinstance(decl, str) else set(decl)
+            return {"types": types - {"standard"}, "why": {t: "declared" for t in types}}
+        ys = self.reported_years()
+        types, why = set(), {}
+        falls = [(k, self.v("revenue", k) / self.v("revenue", k - 10) - 1) for k in ys if self.v("revenue", k - 10)]
+        worst = min(falls, key=lambda x: x[1]) if falls else None
+        if worst and worst[1] <= -0.15:
+            types.add("cyclical")
+            why["cyclical"] = f"detected: FY{worst[0] // 10} revenue {worst[1]:+.0%} y/y"
+        wc = [self.v("wc_increase", k) / self.v("revenue", k) for k in ys if self.has("wc_increase", k)]
+        if wc:
+            med = statistics.median(wc)
+            if med < -0.01:
+                types.add("deferred_revenue")
+                why["deferred_revenue"] = f"detected: median working-capital build {med:+.1%} of revenue, FY{ys[0] // 10}-FY{ys[-1] // 10}"
+        return {"types": types, "why": why}
+
+    def through_cycle_roic(self) -> dict | None:
+        """Average annual ROIC (NOPAT / (equity + net debt) at the year end) over the reported fiscal years."""
+        vals = []
+        for k in self.reported_years():
+            if not all(self.has(x, k) for x in ("operating_income", "equity", "debt", "cash_and_st_investments")):
+                continue
+            pre, tax = self.v("pretax_income", k), self.v("income_tax", k)
+            rate = tax / pre if pre > 0 else self.i["scenarios"]["base"]["steady_tax"]
+            rate = rate if 0 <= rate <= 0.5 else self.i["scenarios"]["base"]["steady_tax"]
+            ic = self.v("equity", k) + self.v("debt", k) - self.v("cash_and_st_investments", k)
+            if ic > 0:
+                vals.append((k, self.v("operating_income", k) * (1 - rate) / ic))
+        if not vals:
+            return None
+        return {"roic": sum(v for _, v in vals) / len(vals), "from": vals[0][0] // 10, "to": vals[-1][0] // 10, "n": len(vals)}
+
     def checks(self, out: dict) -> list[dict]:
         w = out["wacc"]["wacc"]
         S = self.i["scenarios"]
         R = self.i.get("reference_multiples", {})
+        bm = self.business_model()
+        cyc, dfr = "cyclical" in bm["types"], "deferred_revenue" in bm["types"]
+        rule_cyc = f"cyclical rule ({bm['why'].get('cyclical')})"
+        rule_dfr = f"deferred-revenue rule ({bm['why'].get('deferred_revenue')})"
         c = []
         g_max = max(S[k]["terminal_growth"] for k in SCENARIOS)   # S may carry a _note key
         c.append({"check": "WACC above terminal growth", "value": w - g_max, "ok": w - g_max > 0})
         r = out.get("returns", {})
-        if r.get("incremental_roic") is not None:
-            c.append({"check": "Realised 2-year incremental ROIC at or above the base steady-state ROIC", "value": [r["incremental_roic"], r["steady_roic_base"]],
-                      "ok": r["incremental_roic"] >= r["steady_roic_base"], "warn_only": True})
-        c.append({"check": "Steady-state ROIC at or above WACC (all scenarios)", "value": min(S[k]["steady_roic"] for k in SCENARIOS) - w,
-                  "ok": min(S[k]["steady_roic"] for k in SCENARIOS) >= w})
+        tc = self.through_cycle_roic() if cyc else None
+        if tc:
+            c.append({"check": f"Realised through-cycle average ROIC (FY{tc['from']}-FY{tc['to']}) at or above the base steady-state ROIC: {rule_cyc}",
+                      "value": [tc["roic"], r["steady_roic_base"]], "ok": tc["roic"] >= r["steady_roic_base"], "warn_only": True, "rule": "cyclical"})
+        else:
+            ri = self.incremental_roic(floor_wc=True) if dfr else r
+            if ri.get("incremental_roic") is not None:
+                lab = f"{rule_dfr}: a working-capital release counts as zero reinvestment" if dfr else "standard rule"
+                c.append({"check": f"Realised 2-year incremental ROIC at or above the base steady-state ROIC: {lab}", "value": [ri["incremental_roic"], r["steady_roic_base"]],
+                          "ok": ri["incremental_roic"] >= r["steady_roic_base"], "warn_only": True, "rule": "deferred_revenue" if dfr else "standard"})
+        roics = {k: S[k]["steady_roic"] for k in SCENARIOS}
+        if cyc:
+            probs = out["expected"]["probabilities"]
+            avg = sum(probs[k] * roics[k] for k in SCENARIOS)
+            c.append({"check": f"Steady-state ROIC at or above WACC, probability-weighted across scenarios (through-cycle; bear {roics['bear']:.1%}): {rule_cyc}",
+                      "value": avg - w, "ok": avg >= w, "rule": "cyclical"})
+        else:
+            c.append({"check": "Steady-state ROIC at or above WACC (all scenarios): standard rule", "value": min(roics.values()) - w,
+                      "ok": min(roics.values()) >= w, "rule": "standard"})
         t = [out["scenarios"][k]["blended_target"] for k in SCENARIOS]
         c.append({"check": "Scenario order bear <= base <= bull", "value": t, "ok": t[0] <= t[1] + 0.01 <= t[2] + 0.02})
         tv = out["scenarios"]["base"]["dcf"]["terminal_share_of_ev"]
@@ -646,15 +748,28 @@ class Model:
             m = S["base"]["target_multiple"]
             c.append({"check": "Base target multiple inside own 5-year forward range", "value": m,
                       "ok": R["pe5y_low"] <= m <= R["pe5y_high"], "warn_only": True})
-        irr = [v for v in out["scenarios"]["base"]["extrapolation"]["implied_return_on_new_investment"].values() if v is not None] if self.years_ext else []
-        if irr:
-            c.append({"check": "Implied return on new investment >= WACC in every transition year (base)",
-                      "value": min(irr), "ok": min(irr) >= w, "warn_only": True})
+        eb = out["scenarios"]["base"]["extrapolation"]
+        irr = [v for v in eb["implied_return_on_new_investment"].values() if v is not None] if self.years_ext else []
+        if cyc and self.years_ext and eb.get("implied_return_through_cycle") is not None:
+            # a cyclical fading from a peak margin loses NOPAT while it reinvests: judge the reinvestment at the mid-cycle margin
+            v = eb["implied_return_through_cycle"]
+            c.append({"check": f"Implied return on new investment >= WACC through the transition (base, through-cycle: revenue added x steady margin after tax / cumulative reinvestment): {rule_cyc}",
+                      "value": v, "ok": v >= w, "warn_only": True, "rule": "cyclical"})
+        elif irr:
+            c.append({"check": "Implied return on new investment >= WACC in every transition year (base): standard rule",
+                      "value": min(irr), "ok": min(irr) >= w, "warn_only": True, "rule": "standard"})
         for scn in SCENARIOS:
             e = out["scenarios"][scn]["extrapolation"]
             r0, r_ss = e["reinvest_ratio_start"], e["reinvest_ratio_steady"]   # FY+2 consensus vs steady state
-            c.append({"check": f"Starting reinvestment rate > 0 and >= steady state ({scn})", "value": [r0, r_ss],
-                      "ok": r0 > 0 and r0 >= r_ss, "warn_only": True})
+            if dfr:
+                s = out["scenarios"][scn]["series"]
+                wc_share = s["wc_increase"][self.last_explicit] / s["revenue"][self.last_explicit] if s["revenue"][self.last_explicit] else 0.0
+                r0x = r0 - min(0.0, wc_share)      # a working-capital release is the business model, not disinvestment
+                c.append({"check": f"Starting reinvestment rate > 0 and >= steady state ({scn}): {rule_dfr}: working capital {wc_share:+.1%} of revenue not counted against it",
+                          "value": [r0x, r_ss], "ok": r0x > 0 and r0x >= r_ss, "warn_only": True, "rule": "deferred_revenue"})
+            else:
+                c.append({"check": f"Starting reinvestment rate > 0 and >= steady state ({scn}): standard rule", "value": [r0, r_ss],
+                          "ok": r0 > 0 and r0 >= r_ss, "warn_only": True, "rule": "standard"})
         return c
 
 
@@ -667,13 +782,16 @@ def summary(out: dict) -> str:
     p = out["price"]
     lines = [f"Price ${p:,.2f}  |  WACC {out['wacc']['wacc']:.2%}  (Ke {out['wacc']['cost_of_equity']:.2%}, E {out['wacc']['weight_equity']:.1%})",
              f"{'scenario':<10}{'DCF':>10}{'P/E':>10}{'blend':>10}{'upside':>9}{'rev CAGR':>10}{'TV/EV':>8}{'mult@px':>9}"]
+    f = lambda x, spec, wd: (format(x, spec) if x is not None else "off").rjust(wd)   # "off": a disabled P/E leg
     for k in SCENARIOS:
         s = out["scenarios"][k]
-        lines.append(f"{k:<10}{s['dcf']['target']:>10,.0f}{s['multiples']['target']:>10,.0f}{s['blended_target']:>10,.0f}"
-                     f"{s['upside']:>9.1%}{s['revenue_cagr_5y']:>10.1%}{s['dcf']['terminal_share_of_ev']:>8.0%}{s['multiples']['price_implied_multiple']:>9.1f}")
+        lines.append(f"{k:<10}{s['dcf']['target']:>10,.0f}{f(s['multiples']['target'], ',.0f', 10)}{s['blended_target']:>10,.0f}"
+                     f"{s['upside']:>9.1%}{s['revenue_cagr_5y']:>10.1%}{s['dcf']['terminal_share_of_ev']:>8.0%}{f(s['multiples']['price_implied_multiple'], '.1f', 9)}")
     h = out["house"]
-    lines.append(f"{'house':<10}{h['dcf_target']:>10,.0f}{h['multiples_target']:>10,.0f}{h['target']:>10,.0f}{h['upside']:>9.1%}"
-                 f"{'':>10}{'':>8}{h['implied_multiple']:>9.1f}")
+    lines.append(f"{'house':<10}{h['dcf_target']:>10,.0f}{f(h['multiples_target'], ',.0f', 10)}{h['target']:>10,.0f}{h['upside']:>9.1%}"
+                 f"{'':>10}{'':>8}{f(h['implied_multiple'], '.1f', 9)}")
+    for wn in out.get("warnings", []):
+        lines.append(f"WARNING: {wn}")
     ex, im, r = out.get("expected", {}), out.get("implied", {}), out.get("returns", {})
     if ex:
         lines.append(f"expected   target {ex['expected_target']:,.0f} ({ex['expected_upside']:+.1%}), downside to bear {ex['downside_to_bear']:+.1%}, "

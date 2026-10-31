@@ -56,3 +56,4 @@ not compounding; 2026 capex above $30bn without milestones; Q3 deliveries below 
 
 - 2026-10-23: built on the 美投 sum-of-the-parts method (engine gained `sotp_addons`), reproducing 191/290/415;
   narrative from four 美投 pieces.
+- 2026-10-25: the checks now use the deferred-revenue rule (detected: median working-capital build -6.0% of revenue: supplier float rather than deferred revenue, the same treatment) and the starting-reinvestment checks pass under it. Monitor rerun: 191 / 290 / 415 unchanged.

@@ -13,13 +13,17 @@ model-year columns are colour-coded and annual columns bold. Charts are Plotly (
    CAGR). "What to watch at the next print", generated from the adjusted lines. Then the **scenario
    matrix**: what you must believe (adjustments and steady-state assumptions per scenario) and what
    you get (CAGR, EPS, DCF, P/E, blended, upside), with the baseline for drift.
-   *Why first:* the reader should be able to stop after one screen.
+   *Why first:* the reader should be able to stop after one screen. Engine WARNINGs (a P/E leg turned off
+   by a negative or near-zero earnings base, a cost of debt filled in from risk-free + spread) sit under the
+   subtitle in red, and again where they bite (the P/E method table, the WACC table).
 2. **The argument.** The company-specific narrative from the ticker folder's `narrative.py`, every
    number recomputed live; the FCFF, P/E-range and targets charts sit inside it. Without a
    `narrative.py` the report renders a four-step generic method walkthrough.
 3. **Financial model.** Every row of the forecast sheet (income statement with segments, cash flow,
    balance sheet, non-GAAP and ROIC) for the actual and explicit periods, then the transition years,
-   under a bear / base / bull toggle.
+   under a bear / base / bull toggle. The segment rows come from the folder's `segments` block
+   (`report_html.row_specs`): revenue and growth per segment, children indented under their parent,
+   operating income and margin for every segment with an `oi_line`.
 4. **Valuation.** The shared WACC table; for the selected scenario the discounted-cash-flow table,
    the bridge (EV → equity → per share → 12 months forward → target), the P/E leg and the blend.
 5. **Sensitivities.** Base DCF on steady ROIC × margin; P/E target on multiple × scenario EPS; the
@@ -27,7 +31,7 @@ model-year columns are colour-coded and annual columns bold. Charts are Plotly (
 6. **Assumptions and adjustments.** Settings, scenario parameters, the adjustment table, the house
    view paragraph (`thesis.summary`) and rating.
 7. **Monitor.** Position rules (fired ones highlighted), live inputs with their dates, the check
-   list, newly filed quarters with actual-versus-consensus and the roll instruction, the manual items.
+   list (each ROIC and reinvestment check names the rule it used: standard, cyclical or deferred revenue), newly filed quarters with actual-versus-consensus and the roll instruction, the manual items.
 8. **Sources and method notes.**
 
 ## UX rules

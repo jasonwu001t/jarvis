@@ -79,7 +79,9 @@ skips the roll-forward, `market.shares_override` replaces the diluted count: the
 ## WACC
 
 Cost of equity = risk-free + beta × ERP. After-tax cost of debt = pretax cost × (1 − TTM effective
-tax rate over the last four quarters). Weights: market cap (price × diluted shares, or the override)
+tax rate over the last four quarters). With no stated pretax cost (`wacc.pretax_cost_of_debt` null: a fresh
+fill, a filer without debt) the engine uses risk-free + `wacc.debt_spread` (default 1.5%) and the report,
+the markdown and the summary carry a WARNING saying so. Weights: market cap (price × diluted shares, or the override)
 versus debt. Beta is Bloomberg-style: 2-year weekly raw beta vs SPY, adjusted 0.67 × raw + 0.33.
 `wacc.mode: "manual"` with `wacc.value` overrides the computed WACC (美投 AMZN: the average of
 Bloomberg's and FactSet's, 13.8%); the CAPM cost of equity is still computed for display and the
@@ -92,9 +94,15 @@ Quarters 5-8 after the balance-sheet date: `w = (4 − reported quarters)/4`;
 likewise; target = multiple × NI / shares. P/E only in this version (`blend.multiple_type`); for
 EV/EBITDA, P/S or P/B extend `multiples()` the way the template's 估值 sheet does.
 
+A negative or near-zero earnings base (quarters 5-8 net income at or below `blend.pe_min_net_margin`, default
+1%, of quarters 5-8 revenue) has no meaningful multiple: that scenario's P/E leg is off (`multiples.target`
+None, `disabled` true, the raw figure kept as `raw_target`), its weight moves to the DCF, and a WARNING names
+the scenario. A loss-maker valued on GAAP therefore never gets a negative target from the P/E leg; switch
+`earnings_basis` to adjusted when a non-GAAP bridge exists (CRWD) rather than live with a DCF-only value.
+
 ## Blend and house target
 
-Scenario value = `dcf_weight × DCF + (1 − dcf_weight) × multiple`. House target =
+Scenario value = `dcf_weight × DCF + (1 − dcf_weight) × multiple` (the DCF alone when the P/E leg is off). House target =
 `base + p × (bull − base)` for p ≥ 0, `base + p × (base − bear)` for p < 0 (`blend.target_position`).
 
 ## Rate-aware multiple (`blend.multiple_rate_aware`)
@@ -128,7 +136,22 @@ a check warns whenever realised sits below the assumed steady state.
 
 WACC > g; steady ROIC ≥ WACC; bear ≤ base ≤ bull; terminal value ≤ 80% of EV (warning); base
 multiple inside the own 5-year range (warning); implied return on new investment ≥ WACC in every
-transition year (warning); starting reinvestment ratio > 0 and ≥ steady state (warning).
+transition year (warning); starting reinvestment ratio > 0 and ≥ steady state (warning); realised
+incremental ROIC ≥ the base steady ROIC (warning).
+
+The ROIC and reinvestment checks take the company type into account and each says which rule it used
+(`company.business_model`, or detected from the reported fiscal years: cyclical when revenue fell 15% or
+more in a year, deferred revenue when the median working-capital build is below −1% of revenue):
+
+| Check | standard rule | cyclical rule | deferred-revenue rule |
+|---|---|---|---|
+| Steady ROIC ≥ WACC (fail) | every scenario | the probability-weighted average across scenarios (a bear trough below WACC is the cycle) | standard |
+| Realised ROIC ≥ base steady ROIC (warning) | 2-year incremental ROIC | through-cycle average of annual ROIC (NOPAT / (equity + net debt)) over the reported years | 2-year incremental ROIC with a working-capital release counted as zero |
+| Implied return on new investment ≥ WACC (warning) | every transition year | the whole transition at the steady (mid-cycle) margin: revenue added × steady margin after tax / cumulative reinvestment (equals steady ROIC in a steady state) | standard |
+| Starting reinvestment > 0 and ≥ steady state (warning) | (capex + leases − D&A + ΔWC) / revenue | standard | negative working capital not counted against it |
+
+A company can be both (cyclical rules for ROIC, deferred-revenue rule for reinvestment). Declare
+`business_model: "standard"` to switch detection off.
 
 ## What is judgement
 

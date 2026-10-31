@@ -67,3 +67,4 @@ revenue above a quarter of the total or a backed customer failing.
 ## Log
 
 - 2026-10-23: built on the 美投 exit-P/E method, reproducing 227/303/433; narrative from four 美投 pieces.
+- 2026-10-25: first claims board: `consensus_revision` (consensus 2.47 → 2.49 for 2026-11-18).

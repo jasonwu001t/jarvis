@@ -31,8 +31,6 @@ PATTERNS = {
     "capex": re.compile(r"(?:full[- ]year\s+)?(20\d\d)\s+capital\s+expenditures?[^.]*?" + NUM, re.I),
     "expenses": re.compile(r"(?:full[- ]year\s+)?(20\d\d)\s+total\s+expenses?[^.]*?" + NUM, re.I),
     # Amazon style: "Third Quarter 2026 Guidance • Net sales are expected to be between $197.5 billion and $202.0 billion"
-    "revenue_amzn": re.compile(r"(first|second|third|fourth)\s+quarter\s+(20\d\d)\s+guidance.{0,160}?net\s+sales\s+are\s+expected\s+to\s+be\s+between\s+" + NUM_B, re.I | re.S),
-    "operating_income_amzn": re.compile(r"(first|second|third|fourth)\s+quarter\s+(20\d\d)\s+guidance.{0,600}?operating\s+income\s+is\s+expected\s+to\s+be\s+between\s+" + NUM_B, re.I | re.S),
 }
 
 
@@ -102,16 +100,11 @@ def _musd(v: str, unit: str) -> float:
 
 def parse(text: str) -> dict:
     out = {}
-    m = PATTERNS["revenue"].search(text) or PATTERNS["revenue_amzn"].search(text)
+    m = PATTERNS["revenue"].search(text)
     if m:
         q, y, lo, hi, unit = m.groups()
         out["revenue_next_quarter"] = {"period_key": int(y) * 10 + QUARTER_WORDS[q.lower()], "low": _musd(lo, unit), "high": _musd(hi, unit),
                                        "mid": (_musd(lo, unit) + _musd(hi, unit)) / 2, "text": m.group(0)[:200]}
-    m = PATTERNS["operating_income_amzn"].search(text)
-    if m:
-        q, y, lo, hi, unit = m.groups()
-        out["operating_income_next_quarter"] = {"period_key": int(y) * 10 + QUARTER_WORDS[q.lower()], "low": _musd(lo, unit), "high": _musd(hi, unit),
-                                                "mid": (_musd(lo, unit) + _musd(hi, unit)) / 2, "text": m.group(0)[:200]}
     for name in ("capex", "expenses"):
         m = PATTERNS[name].search(text)
         if m:

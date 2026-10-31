@@ -1,8 +1,10 @@
-"""Fill a ticker folder's inputs.json from official sources: XBRL actuals, balance-sheet composites, segments from the
-press releases (when the folder has segments.py), and a mechanical "street" for the forecast periods built from the
-company's own guidance (next-quarter revenue and, where guided, operating income), beat-adjusted, fading to trend.
+"""Fill a ticker folder's inputs.json from official sources through atlas: XBRL actuals (US GAAP or IFRS, in USD, per
+listed share), balance-sheet composites, business segments from the XBRL segment facts, and a mechanical "street" for
+the forecast periods built from the company's own guidance (sec.earnings_guidance: next-quarter revenue and, where
+guided, operating income), beat-adjusted, fading to trend. No per-company code: a folder's segments.py and guidance.py's
+regexes are fallbacks only, used when atlas has nothing for the ticker, and the fill says so.
 
-  python3 fill_from_atlas.py --dir research/AMZN [--since-fy 2023] [--fade 0.8]
+  python3 fill_from_atlas.py --dir research/AMZN [--since-fy 2023] [--fade 0.8] [--no-atlas-segments] [--no-atlas-guidance]
 
 Keeps everything the analyst sets (scenarios, adjustments, rules, thesis, blend settings, wacc.erp); replaces periods,
 lines, segments, as_of and the price. The consensus block it writes is labelled as a guidance street in
@@ -23,6 +25,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import guidance as guid  # noqa: E402
+import atlas_data  # noqa: E402
 from monitor import KPI_TO_LINE, PER_SHARE, period_key  # noqa: E402
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -36,18 +39,8 @@ def get(path: str, **params) -> dict:
 
 
 def kpis(ticker: str) -> dict:
-    out = {}
-    for k in get(f"/api/v1/filings/ticker/{ticker}", top_n=1)["data"]["xbrl"]["kpis"]:
-        out[k["id"]] = {}
-        for r in k.get("quarterly", []) + k.get("annual", []):
-            if r["value"] is None:
-                continue
-            try:
-                key = period_key(r["period"])     # a balance on no fiscal period is labelled by its date: skipped
-            except ValueError:
-                continue
-            out[k["id"]][key] = {"value": r["value"] if k["id"] in PER_SHARE else r["value"] / 1e6, "end": r["end"]}
-    return out
+    """KPI series in USD millions, per listed share, from /research/fundamentals (IFRS filers converted by atlas)."""
+    return atlas_data.fundamentals(ticker, currency="USD")
 
 
 def facts(ticker: str, concept: str, since: str) -> dict:
@@ -64,6 +57,64 @@ def latest_at(series: dict, end: str):
     return series[max(ks)] if ks else 0.0
 
 
+INTEREST_INCOME_CONCEPTS = ["InvestmentIncomeInterest", "InterestIncomeOther", "InvestmentIncomeInterestAndDividend",
+                            "InterestAndOtherIncome", "InterestIncomeOperating",
+                            "InvestmentIncomeNet"]   # last: interest plus other investment income (MU, MSFT tag only this)
+
+
+def quarterly_flows(ticker: str, concept: str, ends: dict, since: str) -> dict:
+    """{quarter key: USD m} for a flow concept from sec.company_facts: the 3-month value where filed, Q4 as the fiscal
+    year less Q1-Q3 (10-Ks state the year only)."""
+    rows = get("/api/v1/data/datasets/sec.company_facts/rows", start=since, limit=2000, **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
+    qtr, yr = {}, {}
+    for r in rows:
+        if not r.get("period_start") or r.get("value") is None:
+            continue
+        days = (dt.date.fromisoformat(r["period_end"]) - dt.date.fromisoformat(r["period_start"])).days
+        if 80 <= days <= 100:
+            qtr[r["period_end"]] = r["value"] / 1e6
+        elif 350 <= days <= 380:
+            yr[r["period_end"]] = r["value"] / 1e6
+    out = {k: qtr[e] for k, e in ends.items() if k % 10 and e in qtr}
+    for k, e in ends.items():
+        if k % 10 == 4 and k not in out and e in yr and all(k - i in out for i in (1, 2, 3)):
+            out[k] = yr[e] - sum(out[k - i] for i in (1, 2, 3))
+    return out
+
+
+def street_other_income(ticker: str, L: dict, K: dict, last4: list, ends: dict, since: str, cash: float, debt: float) -> dict:
+    """Forecast other income a year: the last four quarters' interest income as a yield on the average cash and
+    investments, applied to the cash the street carries, less interest expense at its TTM rate on the carried debt.
+    Without an interest-income fact: the TTM non-operating line (pretax − operating income), said so."""
+    avg = lambda line: statistics.fmean(L[line][k] for k in last4 if k in L.get(line, {})) if any(k in L.get(line, {}) for k in last4) else 0.0
+    cash_avg, debt_avg = avg("cash_and_st_investments"), avg("debt")
+    inc = concept = None
+    for c in INTEREST_INCOME_CONCEPTS:
+        try:
+            fl = quarterly_flows(ticker, c, ends, since)
+        except Exception:  # noqa: BLE001 - try the next concept
+            continue
+        if all(k in fl for k in last4):
+            inc, concept = sum(fl[k] for k in last4), c
+            break
+    ie = K.get("interest_expense", {})
+    exp = sum(ie[k]["value"] for k in last4) if all(ie.get(k, {}).get("value") is not None for k in last4) else None
+    out = {"interest_income_ttm": inc, "interest_expense_ttm": exp, "cash_yield": None, "debt_rate": None}
+    if inc is not None and cash_avg > 0:
+        out["cash_yield"] = inc / cash_avg
+        annual = out["cash_yield"] * cash
+        src = f"interest income ({concept}) {inc:,.0f} over the last four quarters = {out['cash_yield']:.2%} of average cash and investments, on {cash:,.0f} carried"
+        if exp is not None and debt_avg > 0:
+            out["debt_rate"] = exp / debt_avg
+            annual -= out["debt_rate"] * debt
+            src += f", less interest expense {exp:,.0f} = {out['debt_rate']:.2%} of average debt, on {debt:,.0f} carried"
+    else:
+        annual = sum(L["other_income"].get(k, 0.0) for k in last4)
+        src = "no interest-income fact in sec.company_facts: TTM non-operating income (pretax − operating income) carried"
+    out.update({"annual": annual, "source": src})
+    return out
+
+
 def main(argv: list[str]) -> int:
     folder = os.path.abspath(argv[argv.index("--dir") + 1]) if "--dir" in argv else os.getcwd()
     since_fy = int(argv[argv.index("--since-fy") + 1]) if "--since-fy" in argv else dt.date.today().year - 3
@@ -71,11 +122,16 @@ def main(argv: list[str]) -> int:
     cfade = float(argv[argv.index("--capex-fade") + 1]) if "--capex-fade" in argv else None   # growth mode: capex growth fades at this rate
     # default intensity mode: capex / revenue held at the current year's level in FY+1, eased by --capex-ease in FY+2 (0.85 = 15% lower intensity)
     cease = float(argv[argv.index("--capex-ease") + 1]) if "--capex-ease" in argv else 0.85
+    # the most growth (either way) the street extrapolates a year; a guided quarter itself is taken as guided
+    cap = float(argv[argv.index("--growth-cap") + 1]) if "--growth-cap" in argv else 0.5
+    clamp = lambda x: max(-cap, min(cap, x))
     path = os.path.join(folder, "inputs.json")
     inp = json.load(open(path, encoding="utf-8"))
     ticker = inp["company"].get("filing_ticker") or inp["company"]["ticker"]   # SEC data ticker (GOOG -> GOOGL)
-    K = kpis(ticker)
+    F = kpis(ticker)
+    K = F["kpis"]
     rev = K["revenue"]
+    notes = []
     qkeys = sorted(k for k in rev if k % 10 != 0)
     latest = qkeys[-1]
     fy, q = latest // 10, latest % 10
@@ -111,18 +167,45 @@ def main(argv: list[str]) -> int:
                         for k in L["operating_cash_flow"] if k in L["operating_income"]}
     for name in ("dps", "dividends_total", "buybacks", "finance_lease_additions"):
         L.setdefault(name, {})
-    # ---- segments from the press releases, when the folder provides segments.py
+    # ---- segments: the XBRL segment facts through atlas; a folder's segments.py only as a fallback, said out loud
     seg_defs = {}
     seg_mod = None
-    if os.path.exists(os.path.join(folder, "segments.py")):
+    seg_src = None
+    if "--no-atlas-segments" not in argv:
+        try:
+            S = atlas_data.segments(ticker)
+            if S["defs"]:
+                seg_defs, seg_src = S["defs"], S["source"]
+                for line, vals in S["lines"].items():
+                    L[line] = {k: v for k, v in vals.items() if k // 10 >= since_fy - 1}
+                notes.append(f"segments from {seg_src}: {list(seg_defs)} (members seen: {S['members_all']})")
+        except atlas_data.NotCollected as exc:
+            notes.append(f"atlas has no segment facts for {ticker} ({exc}); falling back")
+    if not seg_defs and os.path.exists(os.path.join(folder, "segments.py")):
         spec = importlib.util.spec_from_file_location("ticker_segments", os.path.join(folder, "segments.py"))
         seg_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(seg_mod)
         seg_defs = getattr(seg_mod, "DEFINITIONS", {})
-    releases = guid.collect(ticker, folder, since=f"{since_fy - 1}-01-01")
+        seg_src = "press-release parse (segments.py, per-company fallback)"
+        notes.append("WARNING: segments parsed by the folder's segments.py, not from atlas")
+    # ---- guidance: sec.earnings_guidance through atlas; guidance.py's regexes only as a fallback
+    releases = []
+    gsrc = None
+    if "--no-atlas-guidance" not in argv:
+        try:
+            releases = atlas_data.guidance_releases(ticker, since=f"{since_fy - 1}-01-01")
+            if releases:
+                gsrc = "sec.earnings_guidance via atlas"
+        except atlas_data.NotCollected:
+            releases = []
+    if not releases:
+        releases = guid.collect(ticker, folder, since=f"{since_fy - 1}-01-01")
+        gsrc = "guidance.py regexes over the cached exhibits (fallback)"
+        notes.append("WARNING: guidance from guidance.py regexes, not from atlas")
     if seg_mod:
+        releases_px = guid.collect(ticker, folder, since=f"{since_fy - 1}-01-01") if gsrc.startswith("sec.") else releases
         q_ends = sorted((v["end"], k) for k, v in rev.items() if k % 10 != 0)
-        for r in releases:
+        for r in releases_px:
             text_path = os.path.join(folder, "source", "exhibits", f"{r['accession']}-ex991.txt")
             if not os.path.exists(text_path):
                 continue
@@ -154,6 +237,10 @@ def main(argv: list[str]) -> int:
     lease_r = ttm("finance_lease_additions", last4) / ttm("capex", last4) if ttm("capex", last4) else 0.0
     shares = L["diluted_shares"].get(latest) or L["diluted_shares"][max(L["diluted_shares"])]
     dps_q = L["dps"].get(latest, 0.0)
+    # working capital: the TTM share of revenue reverts to the median share of the reported fiscal years by FY+2
+    wc_years = sorted(k for k in L["wc_increase"] if k % 10 == 0 and (k // 10 < fy or q == 4) and L["revenue"].get(k))
+    wc_med = statistics.median(L["wc_increase"][k] / L["revenue"][k] for k in wc_years) if wc_years else None
+    wc_share = lambda y: wc_r if wc_med is None else wc_r + (wc_med - wc_r) * min(1.0, max(0.0, (y - fy) / 2))
     gd = next((r for r in reversed(releases) if r.get("revenue_next_quarter") and r["revenue_next_quarter"]["period_key"] > latest), None)
     beats = []
     oi_beats = []
@@ -171,18 +258,33 @@ def main(argv: list[str]) -> int:
         prior = L["revenue"].get(gd["revenue_next_quarter"]["period_key"] - 10)
         if prior:
             g = gd["revenue_next_quarter"]["mid"] * beat / prior - 1
-    rq = [fy * 10 + i for i in range(q + 1, 5)]
-    fy0, y1, y2 = fy * 10, (fy + 1) * 10, (fy + 2) * 10
+    g_raw, g, g_capex = g, clamp(g), clamp(g_capex)
+    if abs(g_raw - g) > 1e-12:
+        notes.append(f"WARNING: street growth {g_raw:+.1%} capped at ±{cap:.0%} (--growth-cap)")
+    # after a Q4 the reported year stays as filed: the street starts at FY+1 Q1, the quarter the latest release guides
+    cur = fy + 1 if q == 4 else fy
+    rq = [cur * 10 + i for i in range(q + 1 if q < 4 else 1, 5)]
+    fy0, y1, y2 = cur * 10, (fy + 1) * 10, (fy + 2) * 10          # fy0: the year built from quarters (FY, or FY+1 after a Q4)
+    fwd = [(y * 10, j) for j, y in enumerate(range(cur + 1, fy + 3), start=1)]   # the years after it, growth faded j times
+    carry = {}
+    for line in ("cash_and_st_investments", "debt", "investments", "minority_interest", "equity"):
+        have = sorted(k for k in L.get(line, {}) if k <= latest)
+        carry[line] = L[line][have[-1]] if have else 0.0      # some filers lack a recent value (e.g. no debt): carry the last one, else 0
+    other = street_other_income(ticker, L, K, last4, ends, since, carry["cash_and_st_investments"], carry["debt"])
+    if other["interest_income_ttm"] is None:
+        notes.append(f"WARNING: forecast other income: {other['source']}")
     seg_g = {name: (ttm(f"seg:{name}", last4) / ttm(f"seg:{name}", prev4) - 1) if ttm(f"seg:{name}", prev4) else g for name in seg_defs}
     seg_m = {name: (ttm(f"segoi:{name}", last4) / ttm(f"seg:{name}", last4)) if ttm(f"seg:{name}", last4) else 0.0 for name in seg_defs}
 
-    def put(k, revenue, capex, oi=None, g_seg_scale=1.0):
+    def put(k, revenue, capex, oi=None, other_income=None, wc=None):
         oi = revenue * margin if oi is None else oi
-        ni = oi * (1 - tax)
-        vals = {"revenue": revenue, "operating_income": oi, "pretax_income": oi, "income_tax": oi * tax, "net_income": ni, "adjustments": 0.0,
+        oth = other["annual"] * (1 if k % 10 == 0 else 0.25) if other_income is None else other_income
+        pre_k = oi + oth
+        ni = pre_k * (1 - tax)
+        vals = {"revenue": revenue, "operating_income": oi, "pretax_income": pre_k, "income_tax": pre_k * tax, "net_income": ni, "adjustments": 0.0,
                 "adjusted_net_income": ni, "diluted_shares": shares, "dps": dps_q * (4 if k % 10 == 0 else 1), "dividends_total": dps_q * shares * (4 if k % 10 == 0 else 1),
-                "d_and_a": revenue * da_r, "sbc": revenue * sbc_r, "wc_increase": revenue * wc_r, "capex": capex, "finance_lease_additions": capex * lease_r,
-                "other_income": 0.0, "buybacks": 0.0}
+                "d_and_a": revenue * da_r, "sbc": revenue * sbc_r, "wc_increase": revenue * wc_share(k // 10) if wc is None else wc, "capex": capex,
+                "finance_lease_additions": capex * lease_r, "other_income": oth, "buybacks": 0.0}
         for line, v in vals.items():
             L.setdefault(line, {})[k] = v
 
@@ -198,53 +300,60 @@ def main(argv: list[str]) -> int:
         for name in seg_defs:
             p_ = L.get(f"seg:{name}", {}).get(k - 10)
             if p_:
-                L[f"seg:{name}"][k] = p_ * (1 + seg_g[name] + (g - g_ttm))
+                L[f"seg:{name}"][k] = p_ * (1 + clamp(seg_g[name] + (g_raw - g_ttm)))
                 L.setdefault(f"segoi:{name}", {})[k] = L[f"seg:{name}"][k] * seg_m[name]
-    put(fy0, sum(L["revenue"][fy * 10 + i] for i in range(1, 5)), sum(L["capex"][fy * 10 + i] for i in range(1, 5)), sum(L["operating_income"][fy * 10 + i] for i in range(1, 5)))
-    m_fwd = L["operating_income"][fy0] / L["revenue"][fy0]      # the current year's margin (actual quarters + guided quarter) carries forward
-    rev1, rev2 = L["revenue"][fy0] * (1 + g * fade), L["revenue"][fy0] * (1 + g * fade) * (1 + g * fade * fade)
-    if cfade is not None:
-        cap1, cap2 = L["capex"][fy0] * (1 + g_capex * cfade), L["capex"][fy0] * (1 + g_capex * cfade) * (1 + g_capex * cfade * cfade)
-    else:
-        inten = L["capex"][fy0] / L["revenue"][fy0]
-        cap1, cap2 = rev1 * inten, rev2 * inten * cease
-    put(y1, rev1, cap1, rev1 * m_fwd)
-    put(y2, rev2, cap2, rev2 * m_fwd)
+    qs = [cur * 10 + i for i in range(1, 5)]
+    put(fy0, sum(L["revenue"][k] for k in qs), sum(L["capex"][k] for k in qs), sum(L["operating_income"][k] for k in qs),
+        sum(L["other_income"].get(k, 0.0) for k in qs), sum(L["wc_increase"].get(k, 0.0) for k in qs))
+    m_fwd = L["operating_income"][fy0] / L["revenue"][fy0]      # the built year's margin (actual quarters + guided quarter) carries forward
+    inten = L["capex"][fy0] / L["revenue"][fy0]
+    for yk, j in fwd:
+        rev_y = L["revenue"][yk - 10] * (1 + g * fade ** j)
+        cap_y = L["capex"][yk - 10] * (1 + g_capex * cfade ** j) if cfade is not None else rev_y * inten * (cease if yk == y2 else 1.0)
+        put(yk, rev_y, cap_y, rev_y * m_fwd)
     for name in seg_defs:
         d = L.get(f"seg:{name}", {})
-        if all((fy * 10 + i) in d for i in range(1, 5)):
-            d[fy0] = sum(d[fy * 10 + i] for i in range(1, 5))
-            L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(fy * 10 + i, 0.0) for i in range(1, 5))
-            for yk, f_ in ((y1, fade), (y2, fade * fade)):
-                prev = d[yk - 10]
-                d[yk] = prev * (1 + seg_g[name] * f_)
+        if all(k in d for k in qs):
+            d[fy0] = sum(d[k] for k in qs)
+            L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(k, 0.0) for k in qs)
+            for yk, j in fwd:
+                d[yk] = d[yk - 10] * (1 + clamp(seg_g[name]) * fade ** j)
                 L[f"segoi:{name}"][yk] = d[yk] * seg_m[name]
     # balance items for the street: carry the latest actuals (bridge uses the latest reported quarter anyway)
-    for line in ("cash_and_st_investments", "debt", "investments", "minority_interest", "equity"):
-        have = sorted(k for k in L.get(line, {}) if k <= latest)
-        carry = L[line][have[-1]] if have else 0.0      # some filers lack a recent value (e.g. no debt): carry the last one, else 0
+    for line, v in carry.items():
         L.setdefault(line, {})
-        for k in [fy0, y1, y2]:
-            L[line][k] = carry
-    # ---- periods and metadata
+        for k in ([fy0] if q < 4 else []) + [y1, y2]:
+            L[line][k] = v
+    # ---- periods and metadata (after a Q4 the street is FY+1 and FY+2; FY+1's quarters stay lines, the engine values years)
     periods = [{"key": k, "year": k // 10, "q": k % 10, "status": "actual"} for k in sorted(set(L["revenue"]) & set(rev)) if k <= latest and k // 10 >= since_fy and (k % 10 != 0 or k // 10 < fy or q == 4)]
-    periods += [{"key": k, "year": k // 10, "q": k % 10, "status": "consensus"} for k in rq + [fy0, y1, y2]]
+    periods += [{"key": k, "year": k // 10, "q": k % 10, "status": "consensus"} for k in (rq + [fy0] if q < 4 else []) + [y1, y2]]
     inp["periods"] = periods
     inp["lines"] = {line: {str(k): round(v, 6) for k, v in vals.items() if k // 10 >= since_fy - 1} for line, vals in L.items()}
     inp["segments"] = seg_defs
+    inp["_sources"] = {"fundamentals": f"/research/fundamentals/{ticker}?currency=USD (company_type {F['company_type']}, per_share_divisor {F['per_share_divisor']}, native {F.get('native_unit')})",
+                       "segments": seg_src, "guidance": gsrc, "notes": notes, "filled": dt.date.today().isoformat()}
+    if F["per_share_divisor"] != 1.0:
+        inp["market"]["_adr_note"] = f"per-share lines and share counts are per listed share (ADR), divisor {F['per_share_divisor']} applied by atlas_data.fundamentals"
     px = get(f"/api/v1/market/prices/{inp['company']['ticker']}", limit=1)["data"]["rows"][0]
     inp["market"].update({"price": float(px["close"]), "price_date": px["as_of_date"], "market_cap_musd_override": None})
+    wc_txt = (f"{wc_r:.1%} of revenue (TTM) reverting to the {wc_med:.1%} median of FY{wc_years[0] // 10}-FY{wc_years[-1] // 10} by FY{fy + 2}"
+              if wc_med is not None else f"{wc_r:.1%} of revenue (TTM; no reported fiscal year to revert to)")
     inp["as_of"].update({"latest_reported_fy": fy, "latest_reported_q": q, "balance_sheet_date": rev[latest]["end"],
                          "consensus_date": dt.date.today().isoformat(),
                          "consensus_source": (f"Guidance street built by fill_from_atlas.py on {dt.date.today()}: next-quarter revenue"
                                               + (" and operating income" if gd and gd.get("operating_income_next_quarter") else "")
                                               + f" from the {gd['date']} press release (beat-adjusted x{beat:.3f}" + (f", OI x{oi_beat:.3f}" if oi_beats else "") + ")" if gd else "momentum street")
-                                             + f"; growth {g:+.1%} fading {fade:.0%}/yr; TTM margin {margin:.1%}, tax {tax:.1%}; capex {('growth %+.1f%% fading %.0f%%/yr' % (g_capex * 100, cfade * 100)) if cfade is not None else ('intensity held at %.1f%% of revenue in FY+1, x%.2f in FY+2' % (L['capex'][fy0] / L['revenue'][fy0] * 100, cease))}; working capital derived as NOPAT + D&A + SBC − OCF. Replace with sell-side consensus when available."})
-    inp["_street"] = {"g": g, "g_ttm": g_ttm, "g_capex": g_capex, "margin_ttm": margin, "tax_ttm": tax, "beat": beat, "oi_beat": oi_beat, "da_ratio": da_r, "sbc_ratio": sbc_r, "wc_ratio": wc_r,
+                                             + (f"; FY{fy} is reported in full, the street starts at FY{fy + 1} Q1" if q == 4 else "")
+                                             + f"; growth {g:+.1%}" + (f" (capped from {g_raw:+.1%} at ±{cap:.0%})" if abs(g_raw - g) > 1e-12 else "") + f" fading {fade:.0%}/yr"
+                                             + f"; TTM margin {margin:.1%}, tax {tax:.1%}; capex {('growth %+.1f%% fading %.0f%%/yr' % (g_capex * 100, cfade * 100)) if cfade is not None else ('intensity held at %.1f%% of revenue in FY+1, x%.2f in FY+2' % (L['capex'][fy0] / L['revenue'][fy0] * 100, cease))}"
+                                             + f"; working capital derived as NOPAT + D&A + SBC − OCF, {wc_txt}; other income {other['annual']:,.0f} a year: {other['source']}. Replace with sell-side consensus when available."})
+    inp["_street"] = {"g": g, "g_uncapped": g_raw, "growth_cap": cap, "g_ttm": g_ttm, "g_capex": g_capex, "margin_ttm": margin, "tax_ttm": tax, "beat": beat, "oi_beat": oi_beat,
+                      "da_ratio": da_r, "sbc_ratio": sbc_r, "wc_ratio": wc_r, "wc_ratio_median": wc_med, "wc_median_years": [k // 10 for k in wc_years],
+                      "other_income": other, "street_start": rq[0] if rq else None,
                       "segment_growth": seg_g, "segment_margin": seg_m, "guidance_release": gd["date"] if gd else None}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(inp, fh, indent=1, ensure_ascii=False)
-    print(json.dumps({"latest": latest, "price": inp["market"]["price"], "street": inp["_street"], "periods": len(periods), "segments": list(seg_defs)}, indent=1, default=str))
+    print(json.dumps({"latest": latest, "price": inp["market"]["price"], "street": inp["_street"], "periods": len(periods), "segments": list(seg_defs), "sources": inp["_sources"]}, indent=1, default=str))
     return 0
 
 
