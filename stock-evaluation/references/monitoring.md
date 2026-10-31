@@ -101,9 +101,10 @@ python3 ~/.claude/skills/stock-evaluation/scripts/backtest.py --dir ~/AlphaResea
 ```
 
 Point in time: for every earnings release in the window (8-K item 2.02 from `sec.earnings_releases`)
-the model is rebuilt as of the release plus `--lag` trading days (XBRL actuals known by then, DGS10 and
-a 2-year weekly beta on that day, the close that day), the first rule that fires sets the position at
-that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
+the model is rebuilt as of the release plus `--lag` trading days (XBRL actuals known by then, the
+balance-sheet extras as atlas knew them 14 days after that day, when the 10-Q carrying the release's
+balance sheet is out; DGS10 and a 2-year weekly beta on that day, the close that day), the first rule
+that fires sets the position at that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
 at zero). Because historical sell-side consensus is not available, the forecast block is a mechanical
 street: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and tax, capex on
 its own TTM growth), **guidance** (the company's own next-quarter revenue range, corrected for its

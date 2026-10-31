@@ -1,5 +1,5 @@
 """The equity bridge's balance-sheet lines (cash and short-term investments, debt, investments) as the 2026-10-26 bug
-audit found them in the skill (#20, #21), each on synthetic data. Run with
+audit found them in the skill (#20, #21, #251), each on synthetic data. Run with
 `python3 -B -m unittest discover -s scripts/tests` from the skill root."""
 import contextlib
 import datetime as dt
@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _synth  # noqa: E402
+import backtest  # noqa: E402
 import monitor  # noqa: E402
 import valuation_engine as mm  # noqa: E402
 from test_onboarding_faults import FillCase  # noqa: E402
@@ -149,6 +150,63 @@ class FillCashAndDebt(FillCase):
         self.assertTrue(any(n.startswith("WARNING") and "cash alone" in n and "20232" in n for n in notes), notes)
         self.assertTrue(any(n.startswith("WARNING") and "total_debt" in n and "20231" in n for n in notes), notes)
         self.assertTrue(any(n.startswith("WARNING") and "EquityMethodInvestments" in n for n in notes), notes)
+
+
+class BacktestBalanceVintage(unittest.TestCase):
+    """#251: the backtest read sec.company_facts at its latest vintage, so a fiscal-year-end balance that a later filing
+    repeated looked unknown on the Q4 decision day and the Q3 balance stood in."""
+
+    # (period end, USD m, knowledge time): the year-end balances filed with the 10-K on 2026-01-29, repeated (and
+    # recast) in a July filing nobody could read on the decision day
+    VINTAGES = {"MarketableSecuritiesCurrent": [("2025-09-30", 300.0, "2025-10-30"), ("2025-12-31", 500.0, "2026-01-29"),
+                                                ("2025-12-31", 520.0, "2026-07-30")],
+                "EquityMethodInvestments": [("2025-09-30", 60.0, "2025-10-30"), ("2025-12-31", 80.0, "2026-01-29"),
+                                            ("2025-12-31", 85.0, "2026-07-30")]}
+
+    def get(self, path, **params):
+        if path.startswith("/api/v1/filings/"):
+            kpis = {}
+            for y in (2023, 2024, 2025):
+                for i in range(1, 5):
+                    for kid, v in (("revenue", 1000.0), ("operating_income", 300.0), ("pretax_income", 300.0),
+                                   ("income_tax_expense", 45.0), ("net_income", 255.0), ("shares_diluted", 100.0),
+                                   ("capex", 60.0), ("depreciation_amortization", 50.0), ("share_comp", 30.0),
+                                   ("cash", 4000.0), ("total_debt", 1000.0)):
+                        kpis.setdefault(kid, {"id": kid, "quarterly": [], "annual": []})["quarterly"].append(
+                            {"period": f"{y}-Q{i}", "kind": "quarterly", "end": _synth.quarter_end(y, i), "value": v * 1e6})
+            return {"data": {"xbrl": {"kpis": list(kpis.values())}}}
+        if path.startswith("/api/v1/market/prices/"):
+            days = [dt.date(2025, 12, 1) + dt.timedelta(days=n) for n in range(90)]
+            return {"data": {"rows": [{"as_of_date": d.isoformat(), "close": 100.0} for d in reversed(days) if d.weekday() < 5]}}
+        if path.startswith("/api/v1/macro/series/"):
+            return {"data": {"rows": [{"as_of_date": "2026-01-02", "value": 4.0}]}}
+        if path.endswith("sec.earnings_releases/rows"):
+            return {"data": {"rows": [{"filing_date": "2026-01-28", "form": "8-K"}]}}
+        if path.endswith("sec.company_facts/rows"):
+            self.as_of.append(params.get("as_of"))
+            best = {}
+            for end, v, known in self.VINTAGES.get(params["eq.metric"], []):
+                if (params.get("as_of") is None or known < params["as_of"]) and (end not in best or known > best[end][1]):
+                    best[end] = (v, known)
+            return {"data": {"rows": [{"period_start": None, "period_end": e, "value": v * 1e6, "knowledge_time": f"{k}T21:00:00Z"}
+                                      for e, (v, k) in best.items()]}}
+        raise AssertionError(f"unexpected atlas call {path} {params}")
+
+    def test_the_q4_decision_reads_the_year_end_balance(self):
+        self.as_of = []
+        saved = backtest.get, backtest.guid.collect
+        backtest.get, backtest.guid.collect = self.get, lambda *a, **kw: []
+        try:
+            data = backtest.fetch_all("ZZZ", "/nonexistent", "2025-12-01")
+            evals = backtest.release_evals("ZZZ", data, "2025-12-01")
+        finally:
+            backtest.get, backtest.guid.collect = saved
+        self.assertEqual(evals, [("2026-01-30", 20254)])          # the release plus two trading days
+        inp = backtest.build_inputs(_synth.engine_inputs(fy=2025, q=4), data, 20254, "2026-01-30", "momentum")
+        L = inp["lines"]
+        self.assertEqual(L["cash_and_st_investments"]["20254"], 4500.0)    # 4000 + the 2025-12-31 securities, not 2025-09-30's
+        self.assertEqual(L["investments"]["20254"], 80.0)
+        self.assertEqual(set(self.as_of), {"2026-02-13"})                  # read as atlas knew them then (+14 days)
 
 
 if __name__ == "__main__":

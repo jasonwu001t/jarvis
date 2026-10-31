@@ -20,6 +20,9 @@ adjustment becomes a total-revenue adjustment with the same percentage points.
 
 Evaluation dates are each earnings release (8-K item 2.02) plus --lag trading days (default 2): the user looks at the
 model two days after the call and rebalances at that close. The just-reported quarter counts as known on the release.
+The balance concepts beside the KPIs (short-term investments, investments, finance leases) are read as atlas knew them
+RELEASE_ALLOWANCE_DAYS after each evaluation date: the release states the quarter's balance sheet, XBRL has it with
+the 10-Q filed after it, and no later vintage (a 10-K repeating a year-end balance, a restatement) is read.
 """
 from __future__ import annotations
 
@@ -36,12 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import valuation_engine as mm  # noqa: E402
 import overlays  # noqa: E402
 import guidance as guid  # noqa: E402
-from monitor import KPI_TO_LINE, PER_SHARE, SHARES, period_key  # noqa: E402
+from monitor import (KPI_TO_LINE, PER_SHARE, SHARES, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
+                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS)
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
-EXTRA_CONCEPTS = {"MarketableSecuritiesCurrent": "marketable_securities", "EquityMethodInvestments": "equity_method",
-                  "EquitySecuritiesWithoutReadilyDeterminableFairValueAmount": "non_marketable",
-                  "FinanceLeaseLiability": "finance_lease_liability"}
+EXTRA_CONCEPTS = SHORT_TERM_INVESTMENT_CONCEPTS + DEFAULT_INVESTMENT_CONCEPTS + ["FinanceLeaseLiability"]
+RELEASE_ALLOWANCE_DAYS = 14   # balance facts as of evaluation date + this (the 10-Q with the release's balance sheet)
 
 
 def get(path: str, **params) -> dict:
@@ -61,7 +64,7 @@ VARIANTS = {
 
 
 # ------------------------------------------------------------------------------------------ data
-def fetch_all(ticker: str, folder: str, since: str) -> dict:
+def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2) -> dict:
     kpis = get(f"/api/v1/filings/ticker/{ticker}", top_n=1)["data"]["xbrl"]["kpis"]
     K = {}
     for k in kpis:
@@ -81,12 +84,20 @@ def fetch_all(ticker: str, folder: str, since: str) -> dict:
         macro[name] = {r["as_of_date"]: float(r["value"]) * scale for r in get(f"/api/v1/macro/series/{sid}", limit=2000)["data"]["rows"] if r["value"] is not None}
     gsince = (dt.date.fromisoformat(since) - dt.timedelta(days=400)).isoformat()
     guidance_rows = [r for r in guid.collect(ticker, folder, since=gsince) if r.get("parsed")]
-    extras = {}
-    for concept, name in EXTRA_CONCEPTS.items():
-        rows = get("/api/v1/data/datasets/sec.company_facts/rows", start="2020-01-01", limit=500, **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
-        extras[name] = [{"end": r["period_end"], "known": r["knowledge_time"][:10], "value": r["value"] / 1e6}
-                        for r in rows if r.get("period_start") is None and r["value"] is not None]
-    return {"kpis": K, "prices": px, "rf": rf, "extras": extras, "macro": macro, "guidance": guidance_rows}
+    data = {"kpis": K, "prices": px, "rf": rf, "macro": macro, "guidance": guidance_rows}
+    # the balance concepts point in time, once per decision date: the newest vintage atlas held then, not today's, whose
+    # knowledge_time is the latest filing that repeated a value (a year-end balance looked unknown until then, audit #251)
+    data["evals"] = release_evals(ticker, data, since, lag_days)
+    data["extras"] = {}
+    for d, _ in data["evals"]:
+        as_of = (dt.date.fromisoformat(d) + dt.timedelta(days=RELEASE_ALLOWANCE_DAYS)).isoformat()
+        data["extras"][d] = {}
+        for concept in EXTRA_CONCEPTS:
+            rows = get("/api/v1/data/datasets/sec.company_facts/rows", start="2020-01-01", limit=500, as_of=as_of,
+                       **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
+            data["extras"][d][concept] = [{"end": r["period_end"], "value": r["value"] / 1e6}
+                                          for r in rows if r.get("period_start") is None and r["value"] is not None]
+    return data
 
 
 def last_on_or_before(series: dict, d: str):
@@ -134,18 +145,21 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
         if kpi in ("cash", "total_debt", "eps_diluted"):
             continue
         L[line] = known(K.get(kpi, []))
-    # balance sheet composites at every known quarter end
-    ext = data["extras"]
-    def ext_at(name, end, d):
-        vals = [r for r in ext[name] if r["end"] <= end and r["known"] <= (dt.date.fromisoformat(d) + dt.timedelta(days=14)).isoformat()]
-        vals.sort(key=lambda r: r["end"])
-        return vals[-1]["value"] if vals else 0.0
+    # balance sheet composites at every known quarter end, as fill_from_atlas builds them (audit #21), from the balance
+    # concepts as atlas knew them on the day (fetch_all)
+    ext = data["extras"][eval_date]
+    def ext_at(concept, end, max_days):   # the newest balance at or before `end` and at most max_days older, else None
+        lo = (dt.date.fromisoformat(end) - dt.timedelta(days=max_days)).isoformat()
+        vals = sorted((r["end"], r["value"]) for r in ext.get(concept, []) if lo <= r["end"] <= end)
+        return vals[-1][1] if vals else None
     ends = {r["key"]: r["end"] for r in K["revenue"] if is_known(r["key"])}
     cash = known(K.get("cash", []))
-    debt = known(K.get("total_debt", []))
-    L["cash_and_st_investments"] = {k: cash[k] + ext_at("marketable_securities", ends[k], eval_date) for k in cash if k in ends}
-    L["debt"] = {k: debt[k] + ext_at("finance_lease_liability", ends[k], eval_date) for k in debt if k in ends}
-    L["investments"] = {k: ext_at("equity_method", ends[k], eval_date) + ext_at("non_marketable", ends[k], eval_date) for k in ends}
+    csti = {k: v for k, v in known(K.get("cash_and_short_term_investments", [])).items() if k in ends}
+    debt = {**known(K.get("total_debt", [])), **known(K.get("long_term_debt_incl_current", []))}
+    sti_at = lambda end: next((x for x in (ext_at(c, end, 0) for c in SHORT_TERM_INVESTMENT_CONCEPTS) if x is not None), 0.0)
+    L["cash_and_st_investments"] = {**{k: cash[k] + sti_at(ends[k]) for k in cash if k in ends}, **csti}
+    L["debt"] = {k: debt[k] + (ext_at("FinanceLeaseLiability", ends[k], CARRY_DAYS) or 0.0) for k in debt if k in ends}
+    L["investments"] = {k: sum(ext_at(c, ends[k], CARRY_DAYS) or 0.0 for c in DEFAULT_INVESTMENT_CONCEPTS) for k in ends}
     L["minority_interest"] = {k: 0.0 for k in ends}
     L["other_income"] = {k: L["pretax_income"][k] - L["operating_income"][k] for k in L["pretax_income"] if k in L["operating_income"]}
     L["adjustments"] = {k: 0.0 for k in L["net_income"]}
@@ -506,8 +520,8 @@ def main(argv: list[str]) -> int:
     if lag < 1:
         print(f"--lag must be at least 1 (got {lag}): a decision is made a trading day or more after the release")
         return 2
-    data = fetch_all(ticker, folder, since)
-    evals = release_evals(ticker, data, since, lag_days=lag)
+    data = fetch_all(ticker, folder, since, lag_days=lag)
+    evals = data["evals"]
     results = {}
     cache = {}
     for vname, (street, sizing, use_ov, improvements) in VARIANTS.items():
