@@ -25,6 +25,8 @@ REVENUE_LINE_ALIASES = {"总收入", "Revenue", "revenue", "Total revenue"}
 MARGIN_LINE_ALIASES = {"营业利润率", "Operating margin", "operating_margin"}
 DEFAULT_DEBT_SPREAD = 0.015      # pretax cost of debt = risk-free + this when wacc.pretax_cost_of_debt is null (wacc.debt_spread overrides)
 DEFAULT_PE_MIN_NET_MARGIN = 0.01 # the P/E leg is off for a scenario whose quarters 5-8 net income is at or below this share of revenue
+EARNINGS_BASIS_LINE = {"gaap": "net_income", "ifrs": "net_income",       # blend.earnings_basis (any case) -> the P/E leg's line
+                       "adjusted": "adjusted_net_income", "non-gaap": "adjusted_net_income", "non_gaap": "adjusted_net_income"}
 
 
 def _d(s: str) -> dt.date:
@@ -342,9 +344,11 @@ class Model:
     def multiples(self, scn: str, s: dict) -> dict:
         S = self.i["scenarios"][scn]
         basis = self.i["blend"].get("earnings_basis", "GAAP")
+        ni_line = EARNINGS_BASIS_LINE.get(str(basis).strip().lower())
+        if ni_line is None:   # 'gaap' or 'IFRS' used to value adjusted net income; a typo must not either (audit #256)
+            raise ValueError(f"blend.earnings_basis {basis!r} is not one of {', '.join(EARNINGS_BASIS_LINE)} (any case)")
         n_actual = self.q
         w = (4 - n_actual) / 4                                       # weight of FY+1 in the "quarters 5-8" window
-        ni_line = "net_income" if basis == "GAAP" else "adjusted_net_income"
         ni = w * s[ni_line][self.fy1] + (1 - w) * s[ni_line][self.fy2]
         sh = w * s["diluted_shares"][self.fy1] + (1 - w) * s["diluted_shares"][self.fy2]
         fx = self.i["market"].get("fx", 1.0) * self.i["market"].get("adr_ratio", 1.0)
@@ -428,7 +432,7 @@ class Model:
         """What the price assumes, base scenario: extra growth (pp on every forecast period), steady margin, steady ROIC."""
         base_inputs = copy.deepcopy(self.i)
         base_inputs["blend"]["steady_roic_anchor"] = {"enabled": False}
-        periods = self.fc_quarters + [self.fy1, self.fy2]
+        periods = self.fc_quarters + [self.fy1, self.fy2] + self.extra_years   # every forecast period (audit #91)
         def blended_with_growth(x):
             inp = copy.deepcopy(base_inputs)
             inp["adjustments"] = [a for a in inp["adjustments"]] + [{"line": "Total revenue", "period_key": k, "bear": 0, "base": x, "bull": 0} for k in periods]
@@ -504,7 +508,8 @@ class Model:
                  "target": lerp(b["blended_target"], ba["blended_target"], bu["blended_target"])}
         house["upside"] = house["target"] / self.i["market"]["price"] - 1
         ni_h = lerp(b["multiples"]["q5_q8_net_income"], ba["multiples"]["q5_q8_net_income"], bu["multiples"]["q5_q8_net_income"])
-        house["implied_multiple"] = house["multiples_target"] * ba["multiples"]["q5_q8_shares"] / ni_h if (ni_h and house["multiples_target"] is not None) else None
+        fx = self.i["market"].get("fx", 1.0) * self.i["market"].get("adr_ratio", 1.0)   # the target is per listed share in price currency (audit #255)
+        house["implied_multiple"] = house["multiples_target"] / fx * ba["multiples"]["q5_q8_shares"] / ni_h if (ni_h and house["multiples_target"] is not None) else None
         out["house"] = house
         # probability-weighted value and a position size from reward to risk
         S = self.i["scenarios"]

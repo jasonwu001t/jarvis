@@ -93,7 +93,8 @@ roll-forward, and the report's rate sensitivity steps the manual WACC instead of
 ## The multiple leg
 
 Quarters 5-8 after the balance-sheet date: `w = (4 − reported quarters)/4`;
-`NI = w × NI(FY+1) + (1 − w) × NI(FY+2)` (GAAP or adjusted per `blend.earnings_basis`), shares
+`NI = w × NI(FY+1) + (1 − w) × NI(FY+2)` (per `blend.earnings_basis`, any case: `GAAP` or `IFRS` values net
+income, `adjusted`, `non-GAAP` or `non_gaap` adjusted net income, and any other value is refused), shares
 likewise; target = multiple × NI / shares. P/E only in this version (`blend.multiple_type`); for
 EV/EBITDA, P/S or P/B extend `multiples()` the way the template's 估值 sheet does.
 
@@ -107,6 +108,9 @@ the scenario. A loss-maker valued on GAAP therefore never gets a negative target
 
 Scenario value = `dcf_weight × DCF + (1 − dcf_weight) × multiple` (the DCF alone when the P/E leg is off). House target =
 `base + p × (bull − base)` for p ≥ 0, `base + p × (base − bear)` for p < 0 (`blend.target_position`).
+The house implied multiple (the matrix's "x implied", the summary's mult@px) is the house P/E target, taken
+back out of price currency and per listed share (÷ `market.fx × market.adr_ratio`), over quarters 5-8 EPS, so
+it reads like the target multiple for an ADR or a local-currency model too.
 
 ## Rate-aware multiple (`blend.multiple_rate_aware`)
 
@@ -124,8 +128,9 @@ position signal; the house target is still reported.
 ## Reverse DCF (`out["implied"]`)
 
 What the price assumes in the base scenario, each solved by bisection: percentage points added to
-consensus growth in every forecast period (house adjustments kept) so the blended target equals the
-price; the steady-state margin at which the base DCF equals the price; the steady-state ROIC likewise.
+consensus growth in every forecast period (the current year's unreported quarters, FY+1, FY+2 and any later
+consensus years, the periods the thesis tracker's growth row moves; house adjustments kept) so the blended
+target equals the price; the steady-state margin at which the base DCF equals the price; the steady-state ROIC likewise.
 Far less sensitive to terminal assumptions than the target itself; monitor it quarter by quarter.
 
 ## Realised incremental ROIC and the anchor (`out["returns"]`, `blend.steady_roic_anchor`)
