@@ -271,17 +271,29 @@ def actual_vs_consensus(inputs: dict, kpis: dict, key: int) -> list[dict]:
     return rows
 
 
+def horizon(key: int) -> list[int]:
+    """The consensus periods the engine values once `key` is the latest reported quarter: the rest of its fiscal year,
+    FY+1 and FY+2."""
+    fy, q = key // 10, key % 10
+    return [fy * 10 + i for i in range(q + 1, 5)] + [(fy + 1) * 10, (fy + 2) * 10]
+
+
 def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict, company_type: str = "default") -> list[str]:
     """Write the reported quarter(s) into inputs.json lines and roll the as-of markers. Returns notes; main() adds those
     starting WARNING to the report's warnings. A bridge line with nothing stated for the quarter is carried from the prior
     reported quarter, never left at the consensus value or 0, and inputs['_bridge_carried'] records it, so the engine
-    warns on every run until a fill or a quarter that states it replaces it (audit #20)."""
+    warns on every run until a fill or a quarter that states it replaces it (audit #20).
+
+    as_of rolls to the latest quarter whose horizon the consensus covers, and that quarter's periods are listed (time
+    order). A Q1 after a Q4 opens a year whose FY+2 the block may not carry: rolling anyway made the engine divide by
+    zero (audit #88), so its lines are written, as_of stays and a note asks for the consensus to be extended."""
     notes = []
     L = inputs["lines"]
     inv_concepts = (inputs.get("balance_mapping") or {}).get("investment_concepts", DEFAULT_INVESTMENT_CONCEPTS)
+    prev = inputs["as_of"]["latest_reported_fy"] * 10 + inputs["as_of"]["latest_reported_q"]
+    carried_at = {}
     for key in keys:
-        prev = inputs["as_of"]["latest_reported_fy"] * 10 + inputs["as_of"]["latest_reported_q"]
-        carried = {}
+        carried = carried_at[key] = {}
         end = kpis["revenue"][key]["end"]
         for kpi, line in KPI_TO_LINE.items():
             v = kpis.get(kpi, {}).get(key, {}).get("value")
@@ -328,21 +340,36 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
                 notes.append(f"{key}: finance-lease liability carried forward from {fl['end']} (10-K only)")
         inv = [stated(c) for c in inv_concepts if stated(c) is not None]
         bridge("investments", sum(inv) if inv else None, f"none of {', '.join(inv_concepts)} stated within a year")
-        if carried:
-            inputs["_bridge_carried"] = {str(key): carried}
-        else:
-            inputs.pop("_bridge_carried", None)
         L.setdefault("minority_interest", {})[str(key)] = 0.0
         # the template's "other income" = pretax - operating income
         if L.get("pretax_income", {}).get(str(key)) is not None and L.get("operating_income", {}).get(str(key)) is not None:
             L.setdefault("other_income", {})[str(key)] = round(L["pretax_income"][str(key)] - L["operating_income"][str(key)], 6)
-        for p in inputs["periods"]:
-            if int(p["key"]) == key:
-                p["status"] = "actual"
         if inputs.get("segments"):
             notes.append(f"{key}: segment lines ({' / '.join(inputs['segments'])}) come from the next fill (atlas segment facts) or the press release")
-        inputs["as_of"]["latest_reported_fy"], inputs["as_of"]["latest_reported_q"] = key // 10, key % 10
-        inputs["as_of"]["balance_sheet_date"] = end
+        prev = key   # the next quarter carries from this one: its lines are written whether or not as_of rolls
+    gaps = {key: [k for k in horizon(key) if not L.get("revenue", {}).get(str(k))] for key in keys}
+    ok = [key for key in keys if not gaps[key]]
+    for key in keys:
+        if not ok or key > ok[-1]:
+            notes.append(f"{key}: lines written but as_of not rolled to FY{key // 10} Q{key % 10}: no consensus revenue for "
+                         f"{', '.join(map(str, gaps[key]))}; extend the consensus block (or rerun fill_from_atlas.py), then apply again")
+    if not ok:
+        return notes
+    P, t = inputs["periods"], (lambda k: (k // 10, k % 10 or 5))      # time order: a fiscal year after its quarters
+    for k, status in [(k, "actual") for k in keys if k <= ok[-1]] + [(k, "consensus") for k in horizon(ok[-1])]:
+        p = next((p for p in P if int(p["key"]) == k), None)
+        if p is None:   # FY+1's quarters after a Q4 fill are lines only; the new FY+2 may be too
+            P.insert(max((i + 1 for i, p_ in enumerate(P) if t(int(p_["key"])) < t(k)), default=0),
+                     {"key": k, "year": k // 10, "q": k % 10, "status": status})
+        elif status == "actual":
+            p["status"] = "actual"
+    inputs["as_of"]["latest_reported_fy"], inputs["as_of"]["latest_reported_q"] = ok[-1] // 10, ok[-1] % 10
+    inputs["as_of"]["balance_sheet_date"] = kpis["revenue"][ok[-1]]["end"]
+    # the carry the engine warns on is the one at the quarter as_of rolls to (audit #20); held, the old record stands
+    if carried_at[ok[-1]]:
+        inputs["_bridge_carried"] = {str(ok[-1]): carried_at[ok[-1]]}
+    else:
+        inputs.pop("_bridge_carried", None)
     return notes
 
 
@@ -605,9 +632,16 @@ def main(argv: list[str]) -> int:
                 extras[key] = live_balance_sheet_extras(ft, kpis["revenue"][key]["end"],
                                                         (inputs.get("balance_mapping") or {}).get("investment_concepts"))
             if apply and new_q:
-                notes = apply_actuals(inputs, kpis, new_q, extras, F.get("company_type", "default"))
-                with open(path, "w", encoding="utf-8") as fh:
-                    json.dump(inputs, fh, indent=1, ensure_ascii=False)
+                rolled = copy.deepcopy(inputs)
+                notes = apply_actuals(rolled, kpis, new_q, extras, F.get("company_type", "default"))
+                try:   # save only a roll the engine runs: a saved broken roll crashed every later run (audit #88)
+                    mm.Model(extend_history(rolled, kpis)).run()
+                except Exception as exc:  # noqa: BLE001
+                    notes = [f"NOT applied: the engine cannot run the rolled inputs ({exc!r}); inputs.json left as it was"]
+                else:
+                    inputs = rolled
+                    with open(path, "w", encoding="utf-8") as fh:
+                        json.dump(inputs, fh, indent=1, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             live["kpis"] = {"error": str(exc)}
     model_inputs = extend_history(inputs, live["_kpis"]) if isinstance(live.get("_kpis"), dict) else inputs

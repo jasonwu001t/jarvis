@@ -97,7 +97,7 @@ price, yield, flows and the multiple. Note the choice in the playbook.
 |---|---|
 | `scripts/valuation_engine.py` | The model: three-scenario DCF + P/E, blend, house target, checks, full period table. |
 | `scripts/report_html.py` | The HTML report renderer (loads the ticker folder's `narrative.py` when present). |
-| `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter. |
+| `scripts/monitor.py` | Refresh live inputs from atlas, run the engine, write `reports/<date>.md/.html`; `--apply-actuals` rolls a filed quarter (as_of holds, with a note, until the consensus covers the new FY+2; inputs.json is saved only when the engine runs on the roll). |
 | `scripts/new_ticker.py` | Scaffold a ticker folder with a commented `inputs.json`. |
 | `scripts/fill_from_atlas.py` | Fill a ticker's history, balance composites, segments (via the folder's `segments.py`) and a guidance street from atlas and the press releases. |
 | `scripts/make_video.py` | Narrated slide video in the 美投 valuation-video format (headless Chrome slides + Kokoro neural TTS via `kokoro_tts.py` (or macOS `say`) + ffmpeg, burnt-in subtitles, loudness-normalised); a ticker's `video/slides.py` defines the slides and narration from `inputs.json` and the engine (first use: research/AMD). |

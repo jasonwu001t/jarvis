@@ -44,6 +44,9 @@ class Model:
         self.latest_key = self.fy * 10 + self.q
         self.fc_quarters = [self.fy * 10 + k for k in range(self.q + 1, 5)]      # unreported quarters of the current FY
         self.fy1, self.fy2 = (self.fy + 1) * 10, (self.fy + 2) * 10                # consensus annual periods
+        for k in (self.fy1, self.fy2):   # extrapolate() divides by them: say which year is missing (audit #88)
+            if not self.v("revenue", k):
+                raise ValueError(f"no consensus revenue for FY{k // 10} (FY+{k // 10 - self.fy} of FY{self.fy} Q{self.q}): extend the consensus block")
         # further annual periods carried in the consensus block (a street to FY+5, say) extend the explicit period
         self.extra_years = sorted(int(p["key"]) for p in self.periods if p["q"] == 0 and p["status"] != "actual" and int(p["key"]) > self.fy2)
         self.last_explicit = self.extra_years[-1] if self.extra_years else self.fy2

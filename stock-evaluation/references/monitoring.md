@@ -126,19 +126,24 @@ claim the analyst's historical track record; one name and one window prove nothi
    pretax, tax, net income, EPS, shares, D&A, SBC, OCF, capex, dividends, buybacks, cash, debt, equity).
 2. Judge the thesis lines first: did the adjusted line (ads, capex, …) beat consensus by the pp the
    house assumed? Did guidance move the FY+1 consensus?
-3. `--apply-actuals` writes the quarter into `inputs.json` and rolls `as_of`: cash = atlas's cash and
-   short-term investments (else cash plus the short-term investments stated at the balance date), debt =
+3. `--apply-actuals` writes the quarter into `inputs.json` and lists it in `periods`: cash = atlas's cash
+   and short-term investments (else cash plus the short-term investments stated at the balance date), debt =
    long-term debt with its current portion (US GAAP filers falling back to the noncurrent `total_debt`
    get a warning) + finance leases from the last 10-K (at most a fiscal year and two weeks old),
    investments = `balance_mapping.investment_concepts` (default equity-method + non-marketable), other
    income. Cash with no short-term investments shows under that day's Warnings. A bridge line with
    nothing stated is carried from the prior quarter, never left at the consensus value or 0, and
    `_bridge_carried` in `inputs.json` records it, so every later report warns until the next fill (or
-   a quarter that states it) replaces it.
+   a quarter that states it) replaces it. `as_of` rolls once the consensus covers the new horizon (the
+   rest of the fiscal year, FY+1 and FY+2, each with revenue). A Q1 after a Q4 opens a year whose FY+2 the
+   block may not carry yet: its lines are written, `as_of` stays and the report says which consensus
+   periods to add before applying again. The monitor saves `inputs.json` only when the engine runs on the
+   rolled copy; otherwise the report says "NOT applied" and the file is left as it was.
 4. Key in the segment split from the press release (`seg:*`, `segoi:*` for the new period), or rerun
    `fill_from_atlas.py` once atlas has the segment facts.
 5. Replace the consensus block (unreported quarters, FY+1, FY+2) and bump `as_of.consensus_date`.
-   After a Q4 print the model needs the new FY+2 year of consensus: rerun `fill_from_atlas.py`, which keeps
+   The roll into a new fiscal year (the Q1 after a Q4) needs the new FY+2 year of consensus and the year's
+   remaining quarters: rerun `fill_from_atlas.py` (it rolls `as_of` itself), which keeps
    the reported year as filed (listed once), builds FY+1 from the Q1 guide (beat-adjusted) and the prior
    year's quarters, and FY+2 from FY+1.
 6. Rerun; compare with the previous report; update `tickers/<TICKER>.md` with what changed.

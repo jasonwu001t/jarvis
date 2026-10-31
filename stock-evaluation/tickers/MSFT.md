@@ -63,7 +63,9 @@ promise withdrawn or FY2027 capex >10% above the path.
 3. M365 commercial seats (+6%), Copilot paid seats (30m+) and GitHub Copilot usage revenue.
 4. Capex vs the FY2027 positive-FCF promise; lease accounting changes are not spending cuts.
 5. After the print: `monitor.py --dir … --apply-actuals`; refresh FY2027–28 from the next 美投 valuation update
-   (quarterly) or Bloomberg; keep FY2029–30 unless the thesis changes; rerun.
+   (quarterly) or Bloomberg; keep FY2029–30 unless the thesis changes; rerun. The FY2027 Q1 roll needs consensus
+   lines for FY2027 Q2-Q4 (the folder carries FY2027 as a year only): until they are keyed, `--apply-actuals` writes
+   the quarter's lines but holds `as_of`, with a note naming the missing periods; key them, then apply again.
 
 ## Log
 
