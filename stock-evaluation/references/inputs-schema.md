@@ -103,5 +103,5 @@ when segments are used. `scripts/new_ticker.py` writes a commented skeleton with
   //   per_share_divisor != 1.
   // "_street" (written by fill_from_atlas.py): the street's parameters: g (after the cap), g_uncapped, growth_cap, g_ttm,
   //   g_capex, margin_ttm, tax_ttm, beat, oi_beat, da/sbc/wc ratios, wc_ratio_median and wc_median_years (the reversion target),
-  //   other_income {annual, interest_income_ttm, cash_yield, interest_expense_ttm, debt_rate, source}, street_start,
+  //   other_income {annual, interest_income_ttm, cash_yield, interest_expense_ttm, debt_rate, source, warning}, street_start,
   //   segment growth and margin, guidance_release.

@@ -75,5 +75,40 @@ class TtmOverSharedQuarters(FillCase):
         self.assertEqual(inp["_street"]["ttm_gaps"]["d_and_a / revenue"], [20262])
 
 
+class OtherIncomeWithAnInterestExpenseGap(FillCase):
+    """#95: one missing quarter of interest expense dropped the debt cost from the forecast other income, silently."""
+
+    def world(self):
+        return _synth.AtlasWorld(latest=(2026, 2), cash=4000.0, debt=1000.0, interest_income=40.0, interest_expense=10.0)
+
+    def test_the_quarters_present_are_annualised_and_said_so(self):
+        world = self.world()
+        del world.kpis["interest_expense"][20261]
+        inp = self.fill(world)
+        oth = inp["_street"]["other_income"]
+        self.assertAlmostEqual(oth["annual"], 0.04 * 4000.0 - 0.04 * 1000.0, places=6)   # 30 over three quarters = 40 a year
+        self.assertLess(oth["annual"], oth["interest_income_ttm"])
+        self.assertTrue(_warned(inp, "forecast other income", "interest expense"))
+
+    def test_a_missing_q4_is_derived_from_the_year(self):
+        world = self.world()
+        del world.kpis["interest_expense"][20254]
+        inp = self.fill(world)
+        oth = inp["_street"]["other_income"]
+        self.assertAlmostEqual(oth["interest_expense_ttm"], 40.0, places=6)
+        self.assertAlmostEqual(oth["annual"], 120.0, places=6)
+        self.assertFalse(_warned(inp, "forecast other income"))
+
+    def test_no_interest_expense_with_debt_carries_the_non_operating_line(self):
+        world = self.world()
+        for k in (20253, 20254, 20261, 20262):
+            del world.kpis["interest_expense"][k]
+        inp = self.fill(world)
+        oth = inp["_street"]["other_income"]
+        self.assertAlmostEqual(oth["annual"], 4 * (40.0 - 10.0), places=6)     # pretax − operating income nets the debt cost
+        self.assertIn("non-operating", oth["source"])
+        self.assertTrue(_warned(inp, "forecast other income"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,10 +109,14 @@ def shared_ratio(L: dict, num: str, den: str, keys: list, lag: int = 0):
 
 def street_other_income(ticker: str, L: dict, K: dict, last4: list, ends: dict, since: str, cash: float, debt: float) -> dict:
     """Forecast other income a year: the last four quarters' interest income as a yield on the average cash and
-    investments, applied to the cash the street carries, less interest expense at its TTM rate on the carried debt.
-    Without an interest-income fact: the TTM non-operating line (pretax − operating income), said so."""
-    avg = lambda line: statistics.fmean(L[line][k] for k in last4 if k in L.get(line, {})) if any(k in L.get(line, {}) for k in last4) else 0.0
-    cash_avg, debt_avg = avg("cash_and_st_investments"), avg("debt")
+    investments, applied to the cash the street carries, less interest expense at its TTM rate on the carried debt
+    (a missing Q4 derived from the year; other missing quarters annualised from those served, said so). Without an
+    interest-income fact, or with debt carried and no interest expense in any of the four quarters: the TTM
+    non-operating line (pretax − operating income), which nets the debt cost, said so (`warning`)."""
+    ie = derive_q4({k: v["value"] for k, v in K.get("interest_expense", {}).items() if v.get("value") is not None}, last4)
+    have = [k for k in last4 if k in ie]
+    avg = lambda line, ks=last4: statistics.fmean(L[line][k] for k in ks if k in L.get(line, {})) if any(k in L.get(line, {}) for k in ks) else 0.0
+    cash_avg, debt_avg = avg("cash_and_st_investments"), avg("debt", have or last4)
     inc = concept = None
     for c in INTEREST_INCOME_CONCEPTS:
         try:
@@ -122,20 +126,26 @@ def street_other_income(ticker: str, L: dict, K: dict, last4: list, ends: dict, 
         if all(k in fl for k in last4):
             inc, concept = sum(fl[k] for k in last4), c
             break
-    ie = K.get("interest_expense", {})
-    exp = sum(ie[k]["value"] for k in last4) if all(ie.get(k, {}).get("value") is not None for k in last4) else None
-    out = {"interest_income_ttm": inc, "interest_expense_ttm": exp, "cash_yield": None, "debt_rate": None}
-    if inc is not None and cash_avg > 0:
+    # a quarter not served is annualised from those that are, never read as no debt cost (audit #95)
+    exp = sum(ie[k] for k in have) * 4 / len(have) if have else None
+    out = {"interest_income_ttm": inc, "interest_expense_ttm": exp, "cash_yield": None, "debt_rate": None, "warning": False}
+    if inc is not None and cash_avg > 0 and (exp is not None or debt <= 0):
         out["cash_yield"] = inc / cash_avg
         annual = out["cash_yield"] * cash
         src = f"interest income ({concept}) {inc:,.0f} over the last four quarters = {out['cash_yield']:.2%} of average cash and investments, on {cash:,.0f} carried"
         if exp is not None and debt_avg > 0:
             out["debt_rate"] = exp / debt_avg
             annual -= out["debt_rate"] * debt
-            src += f", less interest expense {exp:,.0f} = {out['debt_rate']:.2%} of average debt, on {debt:,.0f} carried"
+            src += (f", less interest expense {exp:,.0f}" + (f" (annualised from {len(have)} of the last four quarters, {sorted(set(last4) - set(have))} not served)" if len(have) < 4 else "")
+                    + f" = {out['debt_rate']:.2%} of average debt, on {debt:,.0f} carried")
+            out["warning"] = len(have) < 4
     else:
-        annual = sum(L["other_income"].get(k, 0.0) for k in last4)
-        src = "no interest-income fact in sec.company_facts: TTM non-operating income (pretax − operating income) carried"
+        oth = [L["other_income"][k] for k in last4 if k in L["other_income"]]
+        annual = sum(oth) * 4 / len(oth) if oth else 0.0
+        why = ("no interest-income fact in sec.company_facts" if inc is None or cash_avg <= 0
+               else f"no interest expense in any of the last four quarters with {debt:,.0f} of debt carried")
+        src = f"{why}: TTM non-operating income (pretax − operating income) carried" + (f", annualised from {len(oth)} quarters" if len(oth) < 4 else "")
+        out["warning"] = True
     out.update({"annual": annual, "source": src})
     return out
 
@@ -331,7 +341,7 @@ def main(argv: list[str]) -> int:
         have = sorted(k for k in L.get(line, {}) if k <= latest)
         carry[line] = L[line][have[-1]] if have else 0.0      # some filers lack a recent value (e.g. no debt): carry the last one, else 0
     other = street_other_income(ticker, L, K, last4, ends, since, carry["cash_and_st_investments"], carry["debt"])
-    if other["interest_income_ttm"] is None:
+    if other["warning"]:
         notes.append(f"WARNING: forecast other income: {other['source']}")
     seg_g = {name: ratio(f"seg:{name}", f"seg:{name}", lag=10, default=1 + g) - 1 for name in seg_defs}
     # A member with revenue but no operating income (atlas's oi_line None: the PLTR/TSM shape) is revenue-only: no
