@@ -355,6 +355,18 @@ def main(argv: list[str]) -> int:
     # names no oi_line: its members keep theirs where they have operating-income values.
     with_oi = [name for name in seg_defs if (seg_defs[name] or {}).get("oi_line", f"segoi:{name}") is not None and L.get(f"segoi:{name}")]
     seg_m = {name: ratio(f"segoi:{name}", f"seg:{name}") for name in with_oi}
+    top = [name for name in seg_defs if not (seg_defs[name] or {}).get("parent")]
+
+    def reconcile(raw, total):
+        """Scale a street period's segment forecasts so the top-level ones add up to `total` times the share of revenue
+        they made up over the last four reported quarters they all have (1 when they add up to revenue); children scale
+        with them. Grown one by one and capped, they summed to a fraction of an uncapped guided quarter (audit #190)."""
+        tops = [n for n in raw if n in top]
+        ks = [k for k in last4 if tops and all(k in L[f"seg:{n}"] for n in tops)]
+        rv, s_ = sum(L["revenue"][k] for k in ks), sum(raw[n] for n in tops)
+        share = sum(L[f"seg:{n}"][k] for n in tops for k in ks) / rv if rv else None
+        f = total * share / s_ if share and s_ else 1.0
+        return {n: v * f for n, v in raw.items()}
 
     def put(k, revenue, capex, oi=None, other_income=None, wc=None):
         oi = revenue * margin if oi is None else oi
@@ -377,12 +389,11 @@ def main(argv: list[str]) -> int:
             if gd_oi:
                 oi_k = gd_oi["mid"] * oi_beat
         put(k, rev_k, L["capex"].get(k - 10, L["capex"][last4[-1]]) * (1 + g_capex), oi_k)
-        for name in seg_defs:
-            p_ = L.get(f"seg:{name}", {}).get(k - 10)
-            if p_:
-                L[f"seg:{name}"][k] = p_ * (1 + clamp(seg_g[name] + (g_raw - g_ttm)))
-                if name in seg_m:
-                    L.setdefault(f"segoi:{name}", {})[k] = L[f"seg:{name}"][k] * seg_m[name]
+        raw = {name: L[f"seg:{name}"][k - 10] * (1 + clamp(seg_g[name] + (g_raw - g_ttm))) for name in seg_defs if L.get(f"seg:{name}", {}).get(k - 10)}
+        for name, v in reconcile(raw, rev_k).items():
+            L[f"seg:{name}"][k] = v
+            if name in seg_m:
+                L.setdefault(f"segoi:{name}", {})[k] = v * seg_m[name]
     qs = [cur * 10 + i for i in range(1, 5)]
     put(fy0, sum(L["revenue"][k] for k in qs), sum(L["capex"][k] for k in qs), sum(L["operating_income"][k] for k in qs),
         sum(L["other_income"].get(k, 0.0) for k in qs), sum(L["wc_increase"].get(k, 0.0) for k in qs))
@@ -392,16 +403,17 @@ def main(argv: list[str]) -> int:
         rev_y = L["revenue"][yk - 10] * (1 + g * fade ** j)
         cap_y = L["capex"][yk - 10] * (1 + g_capex * cfade ** j) if cfade is not None else rev_y * inten * (cease if yk == y2 else 1.0)
         put(yk, rev_y, cap_y, rev_y * m_fwd)
-    for name in seg_defs:
-        d = L.get(f"seg:{name}", {})
-        if all(k in d for k in qs):
-            d[fy0] = sum(d[k] for k in qs)
+    full = [name for name in seg_defs if all(k in L.get(f"seg:{name}", {}) for k in qs)]
+    for name in full:
+        L[f"seg:{name}"][fy0] = sum(L[f"seg:{name}"][k] for k in qs)
+        if name in seg_m:
+            L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(k, 0.0) for k in qs)
+    for yk, j in fwd:
+        raw = {name: L[f"seg:{name}"][yk - 10] * (1 + clamp(seg_g[name]) * fade ** j) for name in full}
+        for name, v in reconcile(raw, L["revenue"][yk]).items():
+            L[f"seg:{name}"][yk] = v
             if name in seg_m:
-                L[f"segoi:{name}"][fy0] = sum(L[f"segoi:{name}"].get(k, 0.0) for k in qs)
-            for yk, j in fwd:
-                d[yk] = d[yk - 10] * (1 + clamp(seg_g[name]) * fade ** j)
-                if name in seg_m:
-                    L[f"segoi:{name}"][yk] = d[yk] * seg_m[name]
+                L[f"segoi:{name}"][yk] = v * seg_m[name]
     # balance items for the street: carry the latest actuals (bridge uses the latest reported quarter anyway)
     for line, v in carry.items():
         L.setdefault(line, {})

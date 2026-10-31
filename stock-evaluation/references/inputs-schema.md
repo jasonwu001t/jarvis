@@ -97,7 +97,8 @@ Conventions the engine relies on: the periods list carries every actual period a
 period in time order; the current fiscal year's annual consensus (`<fy>0`) exists alongside its
 quarters (after a Q4 the fiscal year is actual and listed once, and there are no forecast quarters: the
 fill keeps FY+1's quarters as lines only, the guided Q1 first); FY+1 and FY+2 annual consensus exist; segment lines exist for the same periods as revenue
-when segments are used. `scripts/new_ticker.py` writes a commented skeleton with all keys.
+when segments are used (the fill scales each street period's top-level segments to add up to its revenue at their share of the
+last four reported quarters; children scale with their parent). `scripts/new_ticker.py` writes a commented skeleton with all keys.
   // "_sources" (written by fill_from_atlas.py): {"fundamentals", "segments", "guidance", "notes": [...WARNING lines when a
   //   fallback was used or a street ratio rests on fewer than four quarters], "filled"}; "market._adr_note" when
   //   per_share_divisor != 1.

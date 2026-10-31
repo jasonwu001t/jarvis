@@ -167,5 +167,43 @@ class GuidanceBasis(FillCase):
         self.assertAlmostEqual(L["operating_income"][20263], world.releases[-1]["operating_income_next_quarter"]["mid"] * 0.5, places=6)
 
 
+def _segments(world, shares, margin=0.30):
+    lines = {}
+    for name, share in shares.items():
+        rev = {y * 10 + i: world.quarter_rev(y, i) * share for y, i in world.quarters()}
+        for y in {y for y, _ in world.quarters()}:
+            if all(y * 10 + i in rev for i in range(1, 5)):
+                rev[y * 10] = sum(rev[y * 10 + i] for i in range(1, 5))
+        lines[f"seg:{name}"] = rev
+        lines[f"segoi:{name}"] = {k: v * margin for k, v in rev.items()}
+    return {"defs": {name: {"parent": None, "oi_line": f"segoi:{name}"} for name in shares}, "lines": lines,
+            "source": "sec.segment_facts via atlas", "members_all": list(shares), "axis": None}
+
+
+class StreetSegmentsAddUp(FillCase):
+    """#190: the guided quarter's total was taken uncapped and every segment was capped at ±50%, so the street segments
+    summed to a fraction of the street total (MU: FY2027 Q1 69,740 against 20,464)."""
+
+    def fill_guided(self, shares):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        mid = world.kpis["revenue"][20253]["value"] * 2.5
+        world.releases = [{"date": "2026-07-29", "accession": "g", "parsed": True,
+                           "revenue_next_quarter": {"period_key": 20263, "low": 0, "high": 0, "mid": mid}}]
+        return self.fill(world, segments=_segments(world, shares))
+
+    def test_segments_sum_to_the_street_total(self):
+        inp = self.fill_guided({"Alpha": 0.6, "Beta": 0.4})
+        L = _lines(inp)
+        for k in (20263, 20264, 20260, 20270, 20280):
+            self.assertAlmostEqual(L["seg:Alpha"][k] + L["seg:Beta"][k], L["revenue"][k], places=6, msg=k)
+            self.assertAlmostEqual(L["segoi:Alpha"][k], L["seg:Alpha"][k] * 0.30, places=6, msg=k)
+
+    def test_segments_that_cover_part_of_revenue_keep_their_share(self):
+        inp = self.fill_guided({"Alpha": 0.5, "Beta": 0.3})
+        L = _lines(inp)
+        for k in (20263, 20264, 20260, 20270, 20280):
+            self.assertAlmostEqual(L["seg:Alpha"][k] + L["seg:Beta"][k], 0.8 * L["revenue"][k], places=6, msg=k)
+
+
 if __name__ == "__main__":
     unittest.main()
