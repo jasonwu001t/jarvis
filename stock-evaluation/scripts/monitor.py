@@ -474,7 +474,10 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
             L.append(f"- Revenue FY{rv['period_key'] // 10} Q{rv['period_key'] % 10}: guidance {money(rv['low'])}–{money(rv['high'])} (mid {money(rv['mid'])}); model consensus {money(cons)}" + (f" ({pct(cons / rv['mid'] - 1)} vs mid)" if cons else ""))
         if cx:
             mk = str(cx["period_key"]); cons = inputs["lines"]["capex"].get(mk)
-            L.append(f"- Capex FY{cx['period_key'] // 10}: guidance {money(cx['low'])}–{money(cx['high'])} (mid {money(cx['mid'])}); model consensus {money(cons)}" + (f" ({pct(cons / cx['mid'] - 1)} vs mid)" if cons else ""))
+            lease = cx.get("includes_finance_lease_principal")     # then compared with capex + finance-lease additions (audit #99)
+            if cons is not None and lease:
+                cons += inputs["lines"].get("finance_lease_additions", {}).get(mk, 0.0)
+            L.append(f"- Capex FY{cx['period_key'] // 10}{' (incl. finance leases)' if lease else ''}: guidance {money(cx['low'])}–{money(cx['high'])} (mid {money(cx['mid'])}); model consensus {money(cons)}" + (f" ({pct(cons / cx['mid'] - 1)} vs mid)" if cons else ""))
         if g.get("expenses_full_year"):
             e_ = g["expenses_full_year"]; L.append(f"- Total expenses FY{e_['period_key'] // 10}: guidance {money(e_['low'])}–{money(e_['high'])}")
     ins = live.get("insider") or {}

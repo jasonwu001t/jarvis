@@ -20,6 +20,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import guidance
+
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
 PER_SHARE_KPIS = {"dividends_per_share", "eps_diluted", "eps_basic"}
 SHARE_KPIS = {"shares_diluted", "shares_basic", "shares_outstanding", "shares_outstanding_cover"}
@@ -146,7 +148,8 @@ BASIS_RANK = {"gaap": 0, "non_gaap": 2}     # an unstated basis ranks 1
 def guidance_releases(ticker: str, since: str = None) -> list:
     """Every parsed guidance row grouped per release, newest last, in guidance.py's shape:
     [{date, accession, revenue_next_quarter: {period_key, low, high, mid, unit, basis, source_text}, operating_income_next_quarter,
-      capex_full_year, expenses_full_year, gross_margin_next_quarter, operating_margin_next_quarter, parsed: True}].
+      capex_full_year (+ includes_finance_lease_principal), expenses_full_year, gross_margin_next_quarter,
+      operating_margin_next_quarter, parsed: True}].
     Where a release states a metric on more than one basis, the GAAP row is kept."""
     params = {"eq.ticker": ticker, "limit": 2000}
     if since:
@@ -170,6 +173,8 @@ def guidance_releases(ticker: str, since: str = None) -> list:
                 ("capex", "fiscal_year"): "capex_full_year", ("opex", "fiscal_year"): "expenses_full_year",
                 ("gross_margin", "next_quarter"): "gross_margin_next_quarter", ("operating_margin", "next_quarter"): "operating_margin_next_quarter",
                 ("eps", "next_quarter"): "eps_next_quarter", ("tax_rate", "next_quarter"): "tax_rate_next_quarter"}.get((r.get("metric"), kind))
+        if name == "capex_full_year":     # a guide that holds finance-lease principal says so (audit #99)
+            val["includes_finance_lease_principal"] = bool(guidance.LEASES_IN_CAPEX.search(r.get("source_text") or ""))
         # One row per metric and period kind: GAAP over an unstated basis over non-GAAP, whatever the row order (MU
         # states eps and gross margin on both); the kept row's basis says which (audit #93).
         if name and (name not in g or BASIS_RANK.get(val["basis"], 1) < BASIS_RANK.get(g[name]["basis"], 1)):

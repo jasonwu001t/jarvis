@@ -80,3 +80,4 @@ tune thresholds on this sample.
 
 - 2026-10-20: built; live run at $694 gave bear 598 / base 808 / bull 881 / house 812 (+16.9%), rule
   "Hold zone"; terminal value 81% of EV flagged (template's own warning). HTML report and cron job added.
+- 2026-10-31: skill fix (audit #99): the capex guide's "including principal payments on finance leases" now travels as `includes_finance_lease_principal` (guidance.py and the atlas rows); the report and the monitor compare it with capex plus finance-lease additions (the audit: FY2026 model -0.2% vs mid on capex alone, +0.3% like for like) and label the row from the flag, and the backtest's guidance street puts it on lease-free capex before adding leases. Not rerun here: the next monitor run shows the new comparison; rerun the backtest to drop the double-counted lease principal.

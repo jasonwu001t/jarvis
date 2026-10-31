@@ -275,5 +275,63 @@ class SegmentSumCheck(FillCase):
         self.assertTrue(_warned(inp, "segments", "70"))
 
 
+META_CAPEX = ("We anticipate 2026 capital expenditures, including principal payments on finance leases, to be in the range "
+              "of $135-145 billion, narrowed from our prior outlook of $130-145 billion.")
+PLAIN_CAPEX = "With the growth across our business we now expect 2026 capital expenditures to be in a range of $91-93 billion."
+
+
+class CapexGuideBasis(unittest.TestCase):
+    """#99: a capex guide 'including principal payments on finance leases' lost that qualifier; the report compared it
+    with lease-free capex under a hard-coded '(incl. finance leases)' label and the backtest added leases on top."""
+
+    def test_parse_and_atlas_rows_carry_the_flag(self):
+        self.assertTrue(guidance.parse(META_CAPEX)["capex_full_year"]["includes_finance_lease_principal"])
+        self.assertFalse(guidance.parse(PLAIN_CAPEX)["capex_full_year"]["includes_finance_lease_principal"])
+        row = {"accession_number": "a1", "knowledge_time": "2026-10-29T13:00:00", "period_key": 20260, "metric": "capex",
+               "period_kind": "fiscal_year", "low": 135e9, "high": 145e9, "mid": 140e9, "unit": "USD", "basis": "gaap",
+               "source_text": META_CAPEX}
+        saved = atlas_data.get
+        atlas_data.get = lambda path, **kw: {"data": {"columns": [{"name": c} for c in row], "rows": [list(row.values())]}}
+        try:
+            cx = atlas_data.guidance_releases("ZZZ")[0]["capex_full_year"]
+        finally:
+            atlas_data.get = saved
+        self.assertTrue(cx["includes_finance_lease_principal"])
+
+    def guided(self, flag):
+        inp = _synth.engine_inputs()
+        inp["lines"]["finance_lease_additions"]["20260"] = 500.0
+        cx = {"period_key": 20260, "low": 1000.0, "high": 1100.0, "mid": 1050.0, "includes_finance_lease_principal": flag}
+        live = {"guidance": {"parsed": True, "date": "2026-07-29", "capex_full_year": cx}}
+        return inp, mm.Model(inp).run(), live
+
+    def test_report_and_monitor_compare_like_with_like(self):
+        inp, out, live = self.guided(True)
+        capex = inp["lines"]["capex"]["20260"]
+        page = report_html.position_section(inp, out, live)
+        self.assertIn("(incl. finance leases)", page)
+        self.assertIn(report_html.m(capex + 500.0), page)
+        md = monitor.render(inp, out, live, [], {}, [])
+        self.assertIn(monitor.money(capex + 500.0), md)
+        inp, out, live = self.guided(False)
+        page = report_html.position_section(inp, out, live)
+        self.assertNotIn("(incl. finance leases)", page)
+        self.assertIn(report_html.m(capex), page)
+
+    def test_backtest_street_capex_excludes_the_lease_share(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        mid = 1200.0
+        data = _backtest_data(world, [{"date": "2026-07-29", "revenue_next_quarter": {"period_key": 20263, "mid": 1400.0},
+                                       "capex_full_year": {"period_key": 20260, "mid": mid, "includes_finance_lease_principal": True}}])
+        for r in data["kpis"]["finance_lease_additions"]:
+            r["value"] = next(c["value"] for c in data["kpis"]["capex"] if c["key"] == r["key"]) * 0.10    # leases 10% of capex
+        inp = backtest.build_inputs(_synth.engine_inputs(), data, 20262, "2026-07-30", "guidance")
+        L = inp["lines"]
+        self.assertAlmostEqual(L["capex"]["20260"] + L["finance_lease_additions"]["20260"], mid, places=6)
+        data["guidance"][0]["capex_full_year"]["includes_finance_lease_principal"] = False
+        L = backtest.build_inputs(_synth.engine_inputs(), data, 20262, "2026-07-30", "guidance")["lines"]
+        self.assertAlmostEqual(L["capex"]["20260"], mid, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

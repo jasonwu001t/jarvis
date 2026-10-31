@@ -396,8 +396,13 @@ def position_section(inputs: dict, out: dict, live: dict) -> str:
             cons = inputs["lines"]["revenue"].get(str(rv["period_key"]))
             gr.append(f"<tr><td>Revenue FY{rv['period_key'] // 10} Q{rv['period_key'] % 10}</td><td class='num'>{m(rv['low'])}–{m(rv['high'])}</td><td class='num'>{m(rv['mid'])}</td><td class='num'>{m(cons)}</td><td class='num'>{pc(cons / rv['mid'] - 1, 1, True) if cons else '—'}</td></tr>")
         if cx:
+            # a guide that holds finance-lease principal is compared with capex plus the model's finance-lease
+            # additions, a separate line; one that does not, with capex alone (audit #99)
+            lease = cx.get("includes_finance_lease_principal")
             cons = inputs["lines"]["capex"].get(str(cx["period_key"]))
-            gr.append(f"<tr><td>Capex FY{cx['period_key'] // 10} (incl. finance leases)</td><td class='num'>{m(cx['low'])}–{m(cx['high'])}</td><td class='num'>{m(cx['mid'])}</td><td class='num'>{m(cons)}</td><td class='num'>{pc(cons / cx['mid'] - 1, 1, True) if cons else '—'}</td></tr>")
+            if cons is not None and lease:
+                cons += inputs["lines"].get("finance_lease_additions", {}).get(str(cx["period_key"]), 0.0)
+            gr.append(f"<tr><td>Capex FY{cx['period_key'] // 10}{' (incl. finance leases)' if lease else ''}</td><td class='num'>{m(cx['low'])}–{m(cx['high'])}</td><td class='num'>{m(cx['mid'])}</td><td class='num'>{m(cons)}</td><td class='num'>{pc(cons / cx['mid'] - 1, 1, True) if cons else '—'}</td></tr>")
         if ep:
             gr.append(f"<tr><td>Total expenses FY{ep['period_key'] // 10}</td><td class='num'>{m(ep['low'])}–{m(ep['high'])}</td><td class='num'>{m(ep['mid'])}</td><td></td><td></td></tr>")
         guid = (f"<h3>Company guidance ({esc(g['date'])} press release) against the model's consensus block</h3><div class='tbl'><table><thead><tr><th>Item (USD m)</th><th>Guided range</th><th>Midpoint</th><th>Model</th><th>Model vs mid</th></tr></thead><tbody>{''.join(gr)}</tbody></table></div>")

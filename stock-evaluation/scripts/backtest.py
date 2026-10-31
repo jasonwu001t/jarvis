@@ -199,6 +199,11 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
         cands = [r for r in data.get("guidance", []) if r["date"] <= eval_date and r.get("revenue_next_quarter")
                  and r["revenue_next_quarter"]["period_key"] > eval_key]
         gd = cands[-1] if cands else None
+    lease_r = 0.0
+    fy_leases = {k: v for k, v in L["finance_lease_additions"].items() if k % 10 == 0}
+    if fy_leases:
+        kk = max(fy_leases)
+        lease_r = fy_leases[kk] / L["capex"][kk] if L["capex"].get(kk) else 0.0
     g_next_q, capex_fy_mid, beat = None, None, 1.0
     if gd:
         # how the company has landed against its own midpoint in the quarters already reported by eval_date (last 6 guided quarters)
@@ -216,7 +221,9 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
             g = g_next_q                       # the company's own near-term growth (beat-adjusted) replaces the trailing rate
         cx = gd.get("capex_full_year")
         if cx and cx["period_key"] == fy * 10:
-            capex_fy_mid = cx["mid"]
+            # a guide that holds finance-lease principal (META) is put on the model's lease-free capex, since the street
+            # adds finance_lease_additions = capex x lease_r on top (audit #99)
+            capex_fy_mid = cx["mid"] / (1 + lease_r) if cx.get("includes_finance_lease_principal") else cx["mid"]
             last_fy_capex = L["capex"].get((fy - 1) * 10)
             if last_fy_capex:
                 g_capex = capex_fy_mid / last_fy_capex - 1
@@ -233,11 +240,6 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
     dps_q = latest("dps")
     L["diluted_shares"].setdefault(eval_key, shares)   # the engine reads both at the latest reported quarter
     L["dps"].setdefault(eval_key, dps_q)
-    lease_r = 0.0
-    fy_leases = {k: v for k, v in L["finance_lease_additions"].items() if k % 10 == 0}
-    if fy_leases:
-        kk = max(fy_leases)
-        lease_r = fy_leases[kk] / L["capex"][kk] if L["capex"].get(kk) else 0.0
     actual_all = {line: everything(K.get(kpi, [])) for kpi, line in KPI_TO_LINE.items()}
 
     def put(k, revenue, capex):
