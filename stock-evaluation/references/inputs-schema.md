@@ -99,7 +99,8 @@ quarters (after a Q4 the fiscal year is actual and listed once, and there are no
 fill keeps FY+1's quarters as lines only, the guided Q1 first); FY+1 and FY+2 annual consensus exist; segment lines exist for the same periods as revenue
 when segments are used. `scripts/new_ticker.py` writes a commented skeleton with all keys.
   // "_sources" (written by fill_from_atlas.py): {"fundamentals", "segments", "guidance", "notes": [...WARNING lines when a
-  //   fallback was used], "filled"}; "market._adr_note" when per_share_divisor != 1.
+  //   fallback was used or a street ratio rests on fewer than four quarters], "filled"}; "market._adr_note" when
+  //   per_share_divisor != 1.
   // "_street" (written by fill_from_atlas.py): the street's parameters: g (after the cap), g_uncapped, growth_cap, g_ttm,
   //   g_capex, margin_ttm, tax_ttm, beat, oi_beat, da/sbc/wc ratios, wc_ratio_median and wc_median_years (the reversion target),
   //   other_income {annual, interest_income_ttm, cash_yield, interest_expense_ttm, debt_rate, source}, street_start,

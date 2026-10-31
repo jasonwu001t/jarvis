@@ -42,8 +42,10 @@ class FillCase(unittest.TestCase):
          fill_from_atlas.atlas_data.guidance_releases, fill_from_atlas.get, fill_from_atlas.guid.collect) = self._saved
         shutil.rmtree(self.tmp)
 
-    def fill(self, world, *args):
+    def fill(self, world, *args, segments=None):
         def no_segments(ticker, **kw):
+            if segments is not None:      # atlas_data.segments' result, when the test serves segments
+                return segments
             raise fill_from_atlas.atlas_data.NotCollected("no segment facts")
         fill_from_atlas.atlas_data.fundamentals = world.fundamentals
         fill_from_atlas.atlas_data.segments = no_segments

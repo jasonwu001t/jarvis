@@ -85,6 +85,28 @@ def quarterly_flows(ticker: str, concept: str, ends: dict, since: str) -> dict:
     return out
 
 
+FLOW_LINES = ("operating_income", "pretax_income", "income_tax", "net_income", "d_and_a", "sbc", "operating_cash_flow",
+              "capex", "finance_lease_additions", "dividends_total", "buybacks", "gross_profit")
+
+
+def derive_q4(series: dict, quarters) -> dict:
+    """Fill a flow series' missing Q4s among `quarters` as the fiscal year (key y*10) less Q1-Q3, the rule
+    quarterly_flows uses: atlas can serve a year's revenue Q4 but not another line's (audit #89)."""
+    for k in quarters:
+        if k % 10 == 4 and k not in series and k - 4 in series and all(k - i in series for i in (1, 2, 3)):
+            series[k] = series[k - 4] - sum(series[k - i] for i in (1, 2, 3))
+    return series
+
+
+def shared_ratio(L: dict, num: str, den: str, keys: list, lag: int = 0):
+    """(Σ num[k] / Σ den[k - lag], the keys used) over only the keys where both values exist: a quarter atlas does not
+    serve is left out of both sides, not counted as zero against a full denominator (audit #89). lag=10 compares a line
+    with the same quarter a year earlier. The ratio is None when no key is shared or the denominator sums to zero."""
+    ks = [k for k in keys if k in L.get(num, {}) and k - lag in L.get(den, {})]
+    d = sum(L[den][k - lag] for k in ks)
+    return (sum(L[num][k] for k in ks) / d if ks and d else None), ks
+
+
 def street_other_income(ticker: str, L: dict, K: dict, last4: list, ends: dict, since: str, cash: float, debt: float) -> dict:
     """Forecast other income a year: the last four quarters' interest income as a yield on the average cash and
     investments, applied to the cash the street carries, less interest expense at its TTM rate on the carried debt.
@@ -145,6 +167,8 @@ def main(argv: list[str]) -> int:
         if line in ("cash", "total_debt", "gaap_eps"):
             continue
         L[line] = {k: v["value"] for k, v in K.get(kpi, {}).items() if k // 10 >= since_fy - 1}
+    for line in FLOW_LINES:
+        derive_q4(L[line], sorted(rev))
     ends = {k: v["end"] for k, v in rev.items()}
     bm = inp.get("balance_mapping") or {}
     sti = [facts(ticker, c, since) for c in SHORT_TERM_INVESTMENT_CONCEPTS]
@@ -181,8 +205,10 @@ def main(argv: list[str]) -> int:
         rate = tx / pre if pre > 0 else 0.2
         rate = rate if 0 <= rate <= 0.5 else 0.2
         return L["operating_income"][k] * (1 - rate)
+    # only where D&A and SBC are served too (a line the filer never tags counts as zero, a missing quarter does not)
+    has = lambda line, k: k in L[line] or not L[line]
     L["wc_increase"] = {k: (_nopat(k) + L["d_and_a"].get(k, 0.0) + L["sbc"].get(k, 0.0)) - L["operating_cash_flow"][k]
-                        for k in L["operating_cash_flow"] if k in L["operating_income"]}
+                        for k in L["operating_cash_flow"] if k in L["operating_income"] and has("d_and_a", k) and has("sbc", k)}
     for name in ("dps", "dividends_total", "buybacks", "finance_lease_additions"):
         L.setdefault(name, {})
     # ---- segments: the XBRL segment facts through atlas; a folder's segments.py only as a fallback, said out loud
@@ -244,15 +270,31 @@ def main(argv: list[str]) -> int:
                         d[y * 10] = sum(d[y * 10 + i] for i in range(1, 5))
     # ---- the street
     last4, prev4 = qkeys[-4:], qkeys[-8:-4]
-    ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)
+    ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)      # revenue: the quarters are revenue's own
+
+    def ratio(num, den="revenue", lag=0, default=0.0, positive=False, absent_ok=False):
+        """A TTM ratio over the last four quarters both lines have (shared_ratio); fewer than four, a WARNING naming the
+        quarters used; none, the latest fiscal year both have, else `default`, said so. positive: `default` when the
+        denominator is not positive (a pretax loss for the tax rate). absent_ok: a line the filer never tags (finance
+        leases) is `default` without a note."""
+        r, ks = shared_ratio(L, num, den, last4, lag)
+        used = ks or [k for k in sorted(L.get(num, {})) if k % 10 == 0 and k - lag in L.get(den, {})][-1:]
+        if not ks:
+            r = shared_ratio(L, num, den, used, lag)[0]
+        if positive and used and sum(L[den][k - lag] for k in used) <= 0:
+            r = None
+        if len(ks) < 4 and not (absent_ok and not L.get(num)):
+            what = f"{num} / {den}" if not lag else f"{num} growth"
+            notes.append(f"WARNING: street {what} over " + (f"{len(ks)} of the last four quarters {ks}, {sorted(set(last4) - set(ks))} not served" if ks
+                         else f"FY{used[0] // 10}: none of the last four quarters {last4} has both" if r is not None else f"nothing: {default} used"))
+        return default if r is None else r
+
     g_ttm = ttm("revenue", last4) / ttm("revenue", prev4) - 1
-    g_capex = ttm("capex", last4) / ttm("capex", prev4) - 1 if ttm("capex", prev4) else g_ttm
-    margin = ttm("operating_income", last4) / ttm("revenue", last4)
-    pre = ttm("pretax_income", last4)
-    tax = min(0.30, max(0.10, ttm("income_tax", last4) / pre)) if pre > 0 else 0.15
-    ratio = lambda line: ttm(line, last4) / ttm("revenue", last4)
+    g_capex = ratio("capex", "capex", lag=10, default=1 + g_ttm) - 1
+    margin = ratio("operating_income")
+    tax = min(0.30, max(0.10, ratio("income_tax", "pretax_income", default=0.15, positive=True)))
     da_r, sbc_r, wc_r = ratio("d_and_a"), ratio("sbc"), ratio("wc_increase")
-    lease_r = ttm("finance_lease_additions", last4) / ttm("capex", last4) if ttm("capex", last4) else 0.0
+    lease_r = ratio("finance_lease_additions", "capex", absent_ok=True)
     shares = L["diluted_shares"].get(latest) or L["diluted_shares"][max(L["diluted_shares"])]
     dps_q = L["dps"].get(latest, 0.0)
     # working capital: the TTM share of revenue reverts to the median share of the reported fiscal years by FY+2
@@ -291,12 +333,12 @@ def main(argv: list[str]) -> int:
     other = street_other_income(ticker, L, K, last4, ends, since, carry["cash_and_st_investments"], carry["debt"])
     if other["interest_income_ttm"] is None:
         notes.append(f"WARNING: forecast other income: {other['source']}")
-    seg_g = {name: (ttm(f"seg:{name}", last4) / ttm(f"seg:{name}", prev4) - 1) if ttm(f"seg:{name}", prev4) else g for name in seg_defs}
+    seg_g = {name: ratio(f"seg:{name}", f"seg:{name}", lag=10, default=1 + g) - 1 for name in seg_defs}
     # A member with revenue but no operating income (atlas's oi_line None: the PLTR/TSM shape) is revenue-only: no
     # margin, no segoi forecast (its ttm raised KeyError and the fill aborted, audit #90). A folder's segments.py
-    # names no oi_line: its members keep theirs.
-    with_oi = [name for name in seg_defs if (seg_defs[name] or {}).get("oi_line", f"segoi:{name}") is not None]
-    seg_m = {name: (ttm(f"segoi:{name}", last4) / ttm(f"seg:{name}", last4)) if ttm(f"seg:{name}", last4) else 0.0 for name in with_oi}
+    # names no oi_line: its members keep theirs where they have operating-income values.
+    with_oi = [name for name in seg_defs if (seg_defs[name] or {}).get("oi_line", f"segoi:{name}") is not None and L.get(f"segoi:{name}")]
+    seg_m = {name: ratio(f"segoi:{name}", f"seg:{name}") for name in with_oi}
 
     def put(k, revenue, capex, oi=None, other_income=None, wc=None):
         oi = revenue * margin if oi is None else oi

@@ -33,7 +33,9 @@ same engine and report and adds its own playbook.
      beat-adjusted, fading to trend, the extrapolated growth capped at ±50% a year by `--growth-cap`; after a
      Q4 the reported year stays as filed and the street starts at the guided Q1; other income = net interest
      at the last four quarters' rates on the carried cash and debt; working capital reverting from its TTM
-     share to the historical median by FY+2). The ticker must be on an atlas list; nothing is per company. A folder's
+     share to the historical median by FY+2; every TTM ratio over the quarters both its lines have, a Q4 atlas
+     lacks derived as the year less Q1-Q3, and a WARNING in `_sources.notes` when fewer than four quarters are
+     shared). The ticker must be on an atlas list; nothing is per company. A folder's
      `segments.py` or `guidance.py`'s regexes are fallbacks only, and the fill records which source it used in
      `_sources` (`references/data-sources.md`). Then set the
      scenario anchors from the company's own history, the adjustments that encode the thesis, the thesis

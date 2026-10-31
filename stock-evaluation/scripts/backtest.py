@@ -42,6 +42,7 @@ import overlays  # noqa: E402
 import guidance as guid  # noqa: E402
 from monitor import (KPI_TO_LINE, PER_SHARE, SHARES, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
                      DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS, balance_instants)
+from fill_from_atlas import FLOW_LINES, derive_q4, shared_ratio  # noqa: E402
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
 RELEASE_ALLOWANCE_DAYS = 14   # balance facts as of evaluation date + this (the 10-Q with the release's balance sheet)
@@ -147,6 +148,8 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
         if kpi in ("cash", "total_debt", "eps_diluted"):
             continue
         L[line] = known(K.get(kpi, []))
+    for line in FLOW_LINES:   # a Q4 atlas does not serve: the known fiscal year less Q1-Q3 (audit #89)
+        derive_q4(L[line], sorted(L["revenue"]))
     # balance sheet composites at every known quarter end, as fill_from_atlas builds them (audit #21), from the balance
     # concepts as atlas knew them on the day (fetch_all)
     ext = data["extras"][eval_date]
@@ -177,9 +180,19 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
     qkeys = sorted(k for k in rev if k % 10 != 0)
     last4 = qkeys[-4:]
     prev4 = qkeys[-8:-4]
-    ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)
+    ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)      # revenue: the quarters are revenue's own
+    gaps = {}
+
+    def ratio(num, den="revenue", lag=0, default=0.0):
+        """A TTM ratio over the last four quarters both lines know, not a missing quarter counted as zero (audit #89);
+        fewer than four go to _street.ttm_gaps, none gives `default`."""
+        r, ks = shared_ratio(L, num, den, last4, lag)
+        if len(ks) < 4:
+            gaps[f"{num} / {den}" if not lag else f"{num} growth"] = ks
+        return default if r is None else r
+
     g = ttm("revenue", last4) / ttm("revenue", prev4) - 1 if ttm("revenue", prev4) else 0.1
-    g_capex = ttm("capex", last4) / ttm("capex", prev4) - 1 if ttm("capex", prev4) else g
+    g_capex = ratio("capex", "capex", lag=10, default=1 + g) - 1
     # guidance street: the release that reported eval_key guides the next quarter's revenue and the fiscal year's capex
     gd = None
     if variant in ("guidance",):
@@ -207,10 +220,12 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
             last_fy_capex = L["capex"].get((fy - 1) * 10)
             if last_fy_capex:
                 g_capex = capex_fy_mid / last_fy_capex - 1
-    margin = ttm("operating_income", last4) / ttm("revenue", last4)
-    tax = min(0.30, max(0.10, ttm("income_tax", last4) / ttm("pretax_income", last4))) if ttm("pretax_income", last4) > 0 else 0.15
-    da_r = ttm("d_and_a", last4) / ttm("revenue", last4)
-    sbc_r = ttm("sbc", last4) / ttm("revenue", last4)
+    margin = ratio("operating_income")
+    tax_r = ratio("income_tax", "pretax_income", default=0.15)
+    pre = sum(L["pretax_income"][k] for k in last4 if k in L["income_tax"] and k in L["pretax_income"])
+    tax = min(0.30, max(0.10, tax_r)) if pre > 0 else 0.15
+    da_r = ratio("d_and_a")
+    sbc_r = ratio("sbc")
     def latest(line, default=0.0):   # newest known value of a line (Q4 per-share and share counts are not derived)
         ks = [k for k in L.get(line, {}) if k <= eval_key and k % 10 != 0] or [k for k in L.get(line, {}) if k <= eval_key]
         return L[line][max(ks)] if ks else default
@@ -295,7 +310,8 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
     inp["wacc"]["beta"] = b["adjusted"] if b else template["wacc"]["beta"]
     inp["wacc"]["risk_free"] = last_on_or_before(data["rf"], eval_date) or template["wacc"]["risk_free"]
     inp["_street"] = {"g_ttm": g, "g_capex_ttm": g_capex, "margin_ttm": margin, "tax_ttm": tax, "beta_raw": b["raw"] if b else None,
-                      "guidance_used": bool(gd), "guidance_date": gd["date"] if gd else None, "guidance_beat": beat if gd else None}
+                      "guidance_used": bool(gd), "guidance_date": gd["date"] if gd else None, "guidance_beat": beat if gd else None,
+                      "ttm_gaps": gaps}
     if not improvements:
         inp["blend"]["multiple_rate_aware"] = {"enabled": False}
         inp["blend"]["steady_roic_anchor"] = {"enabled": False}

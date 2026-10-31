@@ -107,7 +107,7 @@ balance sheet is out; DGS10 and a 2-year weekly beta on that day, the close that
 that fires sets the position at that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
 at zero). Because historical sell-side consensus is not available, the forecast block is a mechanical
 street: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and tax, capex on
-its own TTM growth), **guidance** (the company's own next-quarter revenue range, corrected for its
+its own TTM growth; each ratio over the quarters both its lines know, a short one listed in `_street.ttm_gaps`), **guidance** (the company's own next-quarter revenue range, corrected for its
 historical beat against its midpoint, and full-year capex range from the 8-K exhibit, fading from
 there) and **foresight** (reported figures where the forecast periods have since been reported, an
 upper bound). Variants: momentum/rules, guidance/rules, guidance/EV sizing with the rate-aware multiple
