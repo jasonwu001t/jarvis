@@ -48,6 +48,10 @@ def period_key(period: str) -> int:
     return int(y) * 10 + int(q)
 
 
+class NotConverted(RuntimeError):
+    """atlas served a money KPI in another currency than the one asked for."""
+
+
 def fundamentals(ticker: str, currency: str = "USD") -> dict:
     """{'kpis': {id: {period_key: {value, end, filed, form}}}, 'company_type', 'per_share_divisor', 'currency', 'native_unit'}.
     Money in millions of `currency`; per-share values per listed share (x divisor); share counts in millions of listed-share
@@ -56,6 +60,12 @@ def fundamentals(ticker: str, currency: str = "USD") -> dict:
     div = float(d.get("per_share_divisor") or 1.0)
     out = {}
     for k in d.get("kpis", []):
+        # A money KPI atlas left in another currency (no FX series for it, or none stored: fx.note says why) must
+        # never be read as `currency`: the payload's top-level currency said USD over DKK figures (audit #143).
+        money = str(k.get("unit") or "").split("/")[0]
+        if len(money) == 3 and money.isalpha() and money.isupper() and money != currency.upper():
+            note = (d.get("fx") or {}).get("note") or k.get("fx_note") or "not converted"
+            raise NotConverted(f"{ticker} {k['id']} is served in {money}, not {currency}: {note}")
         series = {}
         for row in k.get("quarterly", []) + k.get("annual", []):
             v = row.get("value")
