@@ -42,7 +42,7 @@ import overlays  # noqa: E402
 import guidance as guid  # noqa: E402
 from monitor import (KPI_TO_LINE, PER_SHARE, SHARES, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
                      DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS, balance_instants)
-from fill_from_atlas import FLOW_LINES, derive_q4, shared_ratio  # noqa: E402
+from fill_from_atlas import FLOW_LINES, derive_q4, ttm_ratio  # noqa: E402
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
 RELEASE_ALLOWANCE_DAYS = 14   # balance facts as of evaluation date + this (the 10-Q with the release's balance sheet)
@@ -183,12 +183,13 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
     ttm = lambda line, ks: sum(L[line].get(k, 0.0) for k in ks)      # revenue: the quarters are revenue's own
     gaps = {}
 
-    def ratio(num, den="revenue", lag=0, default=0.0):
-        """A TTM ratio over the last four quarters both lines know, not a missing quarter counted as zero (audit #89);
-        fewer than four go to _street.ttm_gaps, none gives `default`."""
-        r, ks = shared_ratio(L, num, den, last4, lag)
-        if len(ks) < 4:
-            gaps[f"{num} / {den}" if not lag else f"{num} growth"] = ks
+    def ratio(num, den="revenue", lag=0, default=0.0, positive=False):
+        """A TTM ratio by the fill's rule (ttm_ratio): over the last four quarters both lines know, not a missing quarter
+        counted as zero (audit #89); none shared, the latest fiscal year both know; nothing, `default`. Fewer than four
+        quarters go to _street.ttm_gaps with the keys used (the quarters, or that fiscal year's key)."""
+        r, used = ttm_ratio(L, num, den, last4, lag, positive)
+        if len([k for k in used if k % 10]) < 4:
+            gaps[f"{num} / {den}" if not lag else f"{num} growth"] = used
         return default if r is None else r
 
     g = ttm("revenue", last4) / ttm("revenue", prev4) - 1 if ttm("revenue", prev4) else 0.1
@@ -228,9 +229,7 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
             if last_fy_capex:
                 g_capex = capex_fy_mid / last_fy_capex - 1
     margin = ratio("operating_income")
-    tax_r = ratio("income_tax", "pretax_income", default=0.15)
-    pre = sum(L["pretax_income"][k] for k in last4 if k in L["income_tax"] and k in L["pretax_income"])
-    tax = min(0.30, max(0.10, tax_r)) if pre > 0 else 0.15
+    tax = min(0.30, max(0.10, ratio("income_tax", "pretax_income", default=0.15, positive=True)))
     da_r = ratio("d_and_a")
     sbc_r = ratio("sbc")
     def latest(line, default=0.0):   # newest known value of a line (Q4 per-share and share counts are not derived)

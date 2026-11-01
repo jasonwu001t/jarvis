@@ -92,7 +92,8 @@ The monitor turns the valuation into a position in two steps (`inputs.json → m
 
 The reverse DCF, the realised incremental ROIC, the company's latest guidance against the consensus
 block (`scripts/guidance.py`; a capex guide that includes finance-lease principal, as Meta's does, is
-labelled so and compared with capex plus the finance-lease additions line, any other with capex alone),
+labelled so and compared with capex plus the finance-lease additions line, the ROU additions standing in
+for the principal payments, any other with capex alone),
 and insider open-market flow (Forms 4) sit in the same section of the report as context for the call.
 
 ## Backtest
@@ -108,7 +109,7 @@ balance sheet is out; DGS10 and a 2-year weekly beta on that day, the close that
 that fires sets the position at that close, and the resulting equity curve is compared with buy-and-hold and SPY (price returns, cash
 at zero). Because historical sell-side consensus is not available, the forecast block is a mechanical
 street: **momentum** (no look-ahead: TTM growth fading 20% a year, flat TTM margin and tax, capex on
-its own TTM growth; each ratio over the quarters both its lines know, a short one listed in `_street.ttm_gaps`), **guidance** (the company's own next-quarter revenue range, corrected for its
+its own TTM growth; each ratio by the fill's rule, over the quarters both its lines know, none shared the latest fiscal year both know, a short one listed in `_street.ttm_gaps` with the keys used), **guidance** (the company's own next-quarter revenue range, corrected for its
 historical beat against its midpoint, and full-year capex range from the 8-K exhibit, put on the
 model's lease-free capex when it includes finance-lease principal, fading from there) and **foresight** (reported figures where the forecast periods have since been reported, an
 upper bound). Variants: momentum/rules, guidance/rules, guidance/EV sizing with the rate-aware multiple

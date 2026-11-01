@@ -36,7 +36,8 @@ same engine and report and adds its own playbook.
      at the last four quarters' rates on the carried cash and debt; working capital reverting from its TTM
      share to the historical median by FY+2; every TTM ratio over the quarters both its lines have, a Q4 atlas
      lacks derived as the year less Q1-Q3, and a WARNING in `_sources.notes` when fewer than four quarters are
-     shared; each street period's segments scaled to add up to its revenue at the share of revenue they made up
+     shared (a working-capital quarter atlas serves no D&A or SBC for stays in the lines, outside the ratio);
+     each street period's segments scaled to add up to its revenue at the share of revenue they made up
      over the last four reported quarters). The ticker must be on an atlas list; nothing is per company. A folder's
      `segments.py` or `guidance.py`'s regexes are fallbacks only, and the fill records which source it used in
      `_sources` (`references/data-sources.md`). Then set the

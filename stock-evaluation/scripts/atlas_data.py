@@ -94,31 +94,20 @@ def fundamentals(ticker: str, currency: str = "USD") -> dict:
 AXIS_PREFERENCE = ("platform", "product")     # a 6-K filer's business lines; geography and technology cut the same revenue
 
 
-def segments(ticker: str, recent_quarters: int = 4, axis: str = None) -> dict:
-    """{'defs': {name: {parent: None, oi_line: 'segoi:<name>' | None}}, 'lines': {'seg:<name>': {key: musd}, 'segoi:<name>': {...}},
-    'axis', 'axes', 'members_all', 'latest_keys', 'source'}. A member counts when it has revenue in the latest
-    `recent_quarters` quarters its axis reported (the current reporting structure); older or operating-income-only members
-    are listed in members_all only. A US filer's members (sec.segment_facts) carry no axis: its one business-segment axis.
-    A foreign filer's 6-K members (sec.foreign_quarterly_statements) come on several axes that each cut the same revenue
-    (geography, platform, product, technology): one becomes the business lines (`axis`, else platform, else product, else
-    any but geography and technology), never their union, so a name on two axes ('Others') cannot overwrite the other
-    (audit #142); `axes` lists every axis's members. A name repeated within the axis is told apart by its member_key."""
-    d = get(f"/api/v1/research/fundamentals/{ticker}/segments")["data"]
-    by_axis = {}
-    for m in d.get("segments", []):
-        by_axis.setdefault(m.get("axis"), []).append(m)
-    if axis is None:
-        named = sorted(a for a in by_axis if a)
-        axis = next((a for a in AXIS_PREFERENCE if a in by_axis), None) or next((a for a in named if a not in ("geography", "technology")), None)
-    members = by_axis.get(axis, [])
+def _axis_lines(members: list, recent_quarters: int):
+    """(defs, lines, latest_keys) of one axis's members: those with revenue in the latest `recent_quarters` quarters the
+    axis reported. A name the axis repeats is told apart by its member_key on every occurrence, whatever the row order."""
     latest_keys = sorted({r["fiscal_year"] * 10 + int(r["fiscal_period"][1]) for m in members
                           for r in m["revenue"]["quarterly"] if r.get("fiscal_period", "").startswith("Q")})[-recent_quarters:]
-    defs, lines = {}, {}
+    keep = []
     for m in members:
         rq = {r["fiscal_year"] * 10 + int(r["fiscal_period"][1]): r["value"] for r in m["revenue"]["quarterly"] if r.get("fiscal_period", "").startswith("Q") and r.get("value") is not None}
-        if not latest_keys or not all(k in rq for k in latest_keys):
-            continue
-        name = m["member"] if m["member"] not in defs else f"{m['member']} ({m.get('member_key')})"
+        if latest_keys and all(k in rq for k in latest_keys):
+            keep.append((m, rq))
+    seen = [m["member"] for m, _ in keep]
+    defs, lines = {}, {}
+    for m, rq in keep:
+        name = m["member"] if seen.count(m["member"]) == 1 else f"{m['member']} ({m.get('member_key')})"
         for r in m["revenue"]["annual"]:
             if r.get("value") is not None:
                 rq[r["fiscal_year"] * 10] = r["value"]
@@ -133,6 +122,37 @@ def segments(ticker: str, recent_quarters: int = 4, axis: str = None) -> dict:
         if oi:
             lines[f"segoi:{name}"] = {k: v / 1e6 for k, v in oi.items()}
         defs[name] = {"parent": None, "oi_line": f"segoi:{name}" if oi else None}
+    return defs, lines, latest_keys
+
+
+def _adds_up(built, revenue: dict, tol: float = 0.02) -> bool:
+    """Whether an axis's members sum to within `tol` of revenue ({key: USD m}) in the latest quarter both have."""
+    defs, lines, _ = built
+    ks = [k for k in sorted(revenue) if k % 10 and revenue[k] and defs and all(k in lines[f"seg:{n}"] for n in defs)]
+    return bool(ks) and abs(sum(lines[f"seg:{n}"][ks[-1]] for n in defs) / revenue[ks[-1]] - 1) <= tol
+
+
+def segments(ticker: str, recent_quarters: int = 4, axis: str = None, revenue: dict = None) -> dict:
+    """{'defs': {name: {parent: None, oi_line: 'segoi:<name>' | None}}, 'lines': {'seg:<name>': {key: musd}, 'segoi:<name>': {...}},
+    'axis', 'axes', 'members_all', 'latest_keys', 'source'}. A member counts when it has revenue in the latest
+    `recent_quarters` quarters its axis reported (the current reporting structure); older or operating-income-only members
+    are listed in members_all only. A US filer's members (sec.segment_facts) carry no axis: its one business-segment axis.
+    A foreign filer's 6-K members (sec.foreign_quarterly_statements) come on several axes that each cut the same revenue
+    (geography, platform, product, technology): one becomes the business lines, never their union, so a name on two axes
+    ('Others') cannot overwrite the other (audit #142). That is `axis` when given; else platform, product, then any axis but
+    geography and technology, the first whose members add up to `revenue` ({key: USD m}, within 2% in their latest
+    quarter) when it is passed, else the first of them. `axes` lists every axis's members. A name repeated within the
+    axis is told apart by its member_key. An axis the split does not serve gives no defs."""
+    d = get(f"/api/v1/research/fundamentals/{ticker}/segments")["data"]
+    by_axis = {}
+    for m in d.get("segments", []):
+        by_axis.setdefault(m.get("axis"), []).append(m)
+    if axis is None:
+        named = sorted(a for a in by_axis if a)
+        cands = [a for a in AXIS_PREFERENCE if a in by_axis] + [a for a in named if a not in AXIS_PREFERENCE + ("geography", "technology")]
+        axis = next((a for a in cands if revenue and _adds_up(_axis_lines(by_axis[a], recent_quarters), revenue)), cands[0] if cands else None)
+    members = by_axis.get(axis, [])
+    defs, lines, latest_keys = _axis_lines(members, recent_quarters)
     return {"defs": defs, "lines": lines, "axis": axis if axis is not None else d.get("axis"), "members_all": [m["member"] for m in members],
             "axes": {a: [m["member"] for m in ms] for a, ms in by_axis.items() if a}, "latest_keys": latest_keys,
             "source": f"{d.get('source') or 'sec.segment_facts'} via atlas" + (f", {axis} axis" if axis else "")}

@@ -47,7 +47,7 @@ class TtmOverSharedQuarters(FillCase):
         st = inp["_street"]
         self.assertAlmostEqual(st["da_ratio"], 0.05, places=9)
         self.assertAlmostEqual(st["margin_ttm"], 0.30, places=9)
-        self.assertAlmostEqual(st["wc_ratio"], 0.02, places=9)     # not derived for a quarter without D&A
+        self.assertAlmostEqual(st["wc_ratio"], 0.02, places=9)     # a quarter without D&A left out of the ratio
         self.assertTrue(_warned(inp, "d_and_a"))
         self.assertTrue(_warned(inp, "operating_income"))
 
@@ -73,6 +73,46 @@ class TtmOverSharedQuarters(FillCase):
         self.assertAlmostEqual(L["d_and_a"]["20263"] / L["revenue"]["20263"], 0.05, places=9)
         self.assertAlmostEqual(inp["_street"]["margin_ttm"], 0.30, places=9)
         self.assertEqual(inp["_street"]["ttm_gaps"]["d_and_a / revenue"], [20262])
+
+    def test_working_capital_lines_keep_a_quarter_without_d_and_a(self):
+        """The actual wc_increase quarter stays in the lines (the engine's realised ROIC and the FY0 sum read a missing one
+        as zero); only the TTM ratio leaves it out (CRWD: a deferred-revenue build, D&A served in two quarters of 21)."""
+        world = _synth.AtlasWorld(latest=(2026, 2), wc_share=lambda y, i: -0.10)
+        del world.kpis["depreciation_amortization"][20261]
+        inp = self.fill(world)
+        L = _lines(inp)
+        self.assertIn(20261, L["wc_increase"])
+        self.assertAlmostEqual(L["wc_increase"][20262], -0.10 * world.kpis["revenue"][20262]["value"], places=6)
+        self.assertAlmostEqual(inp["_street"]["wc_ratio"], -0.10, places=9)
+        self.assertAlmostEqual(L["wc_increase"][20260], sum(L["wc_increase"][20260 + i] for i in range(1, 5)), places=6)
+        self.assertTrue(_warned(inp, "wc_increase"))
+
+    def test_no_shared_quarter_falls_back_to_the_latest_fiscal_year(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        for k in (20253, 20254, 20261, 20262):
+            del world.kpis["depreciation_amortization"][k]
+        inp = self.fill(world)
+        self.assertAlmostEqual(inp["_street"]["da_ratio"], 0.05, places=9)
+        self.assertTrue(_warned(inp, "d_and_a", "FY2025"))
+
+    def test_the_backtest_falls_back_to_the_latest_fiscal_year_too(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        for k in (20253, 20254, 20261, 20262):
+            del world.kpis["depreciation_amortization"][k]
+        inp = backtest.build_inputs(_synth.engine_inputs(), _backtest_data(world), 20262, "2026-07-30", "momentum")
+        L = inp["lines"]
+        self.assertAlmostEqual(L["d_and_a"]["20263"] / L["revenue"]["20263"], 0.05, places=9)
+        self.assertEqual(inp["_street"]["ttm_gaps"]["d_and_a / revenue"], [20250])
+
+    def test_a_growth_with_no_year_ago_quarter_names_the_growth_used(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        segs = _segments(world, {"Alpha": 0.6, "Beta": 0.4})
+        for line in ("seg:Beta", "segoi:Beta"):
+            segs["lines"][line] = {k: v for k, v in segs["lines"][line].items() if k >= 20253 and k % 10}
+        inp = self.fill(world, segments=segs)
+        notes = _warned(inp, "seg:Beta growth")
+        self.assertTrue(notes)
+        self.assertIn("growth +10.0% used", notes[0])      # the momentum growth, not the factor 1.1
 
 
 class OtherIncomeWithAnInterestExpenseGap(FillCase):
@@ -107,6 +147,19 @@ class OtherIncomeWithAnInterestExpenseGap(FillCase):
         oth = inp["_street"]["other_income"]
         self.assertAlmostEqual(oth["annual"], 4 * (40.0 - 10.0), places=6)     # pretax − operating income nets the debt cost
         self.assertIn("non-operating", oth["source"])
+        self.assertTrue(_warned(inp, "forecast other income"))
+
+    def test_no_non_operating_line_still_charges_the_interest_expense(self):
+        """MCD: no interest-income fact and no pretax line in atlas, interest expense and debt served: the fallback
+        carried 0, 'annualised from 0 quarters'."""
+        world = self.world()
+        world.facts_rows = lambda metric: []
+        del world.kpis["pretax_income"]
+        inp = self.fill(world)
+        oth = inp["_street"]["other_income"]
+        self.assertAlmostEqual(oth["annual"], -0.04 * 1000.0, places=6)    # 40 a year on 1,000 of average debt
+        self.assertIn("interest expense", oth["source"])
+        self.assertNotIn("from 0 quarters", oth["source"])
         self.assertTrue(_warned(inp, "forecast other income"))
 
 
@@ -165,6 +218,15 @@ class GuidanceBasis(FillCase):
         L = _lines(inp)
         self.assertAlmostEqual(inp["_street"]["oi_beat"], 0.5, places=9)    # GAAP actual 30% of revenue over a 60% guide
         self.assertAlmostEqual(L["operating_income"][20263], world.releases[-1]["operating_income_next_quarter"]["mid"] * 0.5, places=6)
+
+    def test_older_gaap_guides_do_not_label_a_non_gaap_guided_quarter(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        world.releases = self.releases(world, "gaap")
+        world.releases[-1]["operating_income_next_quarter"]["basis"] = "non_gaap"
+        inp = self.fill(world)
+        L = _lines(inp)
+        self.assertAlmostEqual(L["operating_income"][20263] / L["revenue"][20263], inp["_street"]["margin_ttm"], places=9)
+        self.assertNotIn("OI x", inp["as_of"]["consensus_source"])
 
 
 def _segments(world, shares, margin=0.30):
@@ -257,10 +319,20 @@ class SegmentAxes(unittest.TestCase):
         self.assertEqual(S["axis"], "us-gaap:StatementBusinessSegmentsAxis")
 
     def test_a_repeated_name_on_one_axis_does_not_overwrite(self):
-        self.serve([_member("Other", None, 60.0, key="other_a"), _member("Other", None, 40.0, key="other_b")])
-        S = atlas_data.segments("ZZZ")
-        self.assertEqual(len(S["defs"]), 2)
-        self.assertEqual(sum(S["lines"][f"seg:{n}"][20262] for n in S["defs"]), 100.0)
+        members = [_member("Other", None, 60.0, key="other_a"), _member("Other", None, 40.0, key="other_b")]
+        for order in (members, members[::-1]):          # the names do not depend on the row order
+            self.serve(order)
+            S = atlas_data.segments("ZZZ")
+            self.assertEqual(sorted(S["defs"]), ["Other (other_a)", "Other (other_b)"])
+            self.assertEqual(S["lines"]["seg:Other (other_a)"][20262], 60.0)
+
+    def test_the_axis_that_adds_up_to_revenue_is_chosen(self):
+        self.serve([_member("HPC", "platform", 60.0),                    # a platform member not served: 60 of 100
+                    _member("Wafer", "product", 90.0), _member("Others", "product", 10.0)])
+        self.assertEqual(atlas_data.segments("ZZZ")["axis"], "platform")
+        S = atlas_data.segments("ZZZ", revenue={20262: 100.0})
+        self.assertEqual((S["axis"], sorted(S["defs"])), ("product", ["Others", "Wafer"]))
+        self.assertEqual(atlas_data.segments("ZZZ", revenue={20262: 300.0})["axis"], "platform")   # none adds up: preference
 
 
 class SegmentSumCheck(FillCase):
@@ -273,6 +345,23 @@ class SegmentSumCheck(FillCase):
         inp = self.fill(world, segments=segs)
         self.assertIn("platform", inp["_sources"]["segments"])
         self.assertTrue(_warned(inp, "segments", "70"))
+
+    def test_the_check_uses_the_latest_quarter_the_segments_have(self):
+        """TSM: the platform axis stops a quarter before revenue, and lacks the year-ago quarter of the next one."""
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        segs = _segments(world, {"Alpha": 0.5, "Beta": 0.2})
+        for line in segs["lines"].values():
+            line.pop(20262), line.pop(20253)
+        inp = self.fill(world, segments=segs)
+        self.assertTrue(_warned(inp, "segments", "70%", "20261"))
+        self.assertTrue(_warned(inp, "no FY2026 street value", "20262", "20263"))
+
+    def test_an_axis_without_members_is_said(self):
+        world = _synth.AtlasWorld(latest=(2026, 2))
+        segs = {"defs": {}, "lines": {}, "axis": None, "axes": {"geography": ["Taiwan"], "technology": ["3nm"]},
+                "members_all": [], "latest_keys": [], "source": "sec.foreign_quarterly_statements via atlas"}
+        inp = self.fill(world, segments=segs)
+        self.assertTrue(_warned(inp, "segment", "geography", "technology"))
 
 
 META_CAPEX = ("We anticipate 2026 capital expenditures, including principal payments on finance leases, to be in the range "
@@ -297,6 +386,15 @@ class CapexGuideBasis(unittest.TestCase):
         finally:
             atlas_data.get = saved
         self.assertTrue(cx["includes_finance_lease_principal"])
+
+    def test_the_whole_sentence_is_read_and_a_negation_is_not_a_flag(self):
+        flag = lambda text: guidance.parse(text)["capex_full_year"]["includes_finance_lease_principal"]
+        self.assertTrue(flag("Including principal payments on finance leases, we expect 2026 capital expenditures to be "
+                             "in the range of $135-145 billion."))
+        self.assertFalse(flag("We expect 2026 capital expenditures, not including finance leases, to be in the range of "
+                              "$135-145 billion."))
+        self.assertFalse(flag("Lease costs, including finance leases, rose. We expect 2026 capital expenditures to be in the "
+                              "range of $91-93 billion."))
 
     def guided(self, flag):
         inp = _synth.engine_inputs()

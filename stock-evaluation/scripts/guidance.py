@@ -34,7 +34,9 @@ PATTERNS = {
 }
 # Meta style: "2026 capital expenditures, including principal payments on finance leases, to be in the range of ..." The
 # guide then holds lease principal while the model's capex line does not (finance_lease_additions is its own line).
-LEASES_IN_CAPEX = re.compile(r"including\s+(?:principal\s+payments\s+(?:on|of)\s+)?finance\s+leases?", re.I)
+# "not including finance leases" is no flag.
+LEASES_IN_CAPEX = re.compile(r"(?<!not\s)including\s+(?:principal\s+payments\s+(?:on|of)\s+)?finance\s+leases?", re.I)
+SENTENCE_END = re.compile(r"\.\s")
 
 
 def contact_email() -> str:
@@ -114,8 +116,10 @@ def parse(text: str) -> dict:
             y, lo, hi, unit = m.groups()
             out[f"{name}_full_year"] = {"period_key": int(y) * 10, "low": _musd(lo, unit), "high": _musd(hi, unit),
                                         "mid": (_musd(lo, unit) + _musd(hi, unit)) / 2, "text": m.group(0)[:200]}
-            if name == "capex":     # the qualifier sits anywhere in the sentence (audit #99)
-                sentence = text[m.start():(text.find(". ", m.end()) + 1) or len(text)]
+            if name == "capex":     # the qualifier sits anywhere in the sentence, before the year too (audit #99)
+                start = ([e.end() for e in SENTENCE_END.finditer(text, 0, m.start())] or [0])[-1]
+                stop = SENTENCE_END.search(text, m.end())
+                sentence = text[start:stop.start() + 1 if stop else len(text)]
                 out["capex_full_year"]["includes_finance_lease_principal"] = bool(LEASES_IN_CAPEX.search(sentence))
     return out
 

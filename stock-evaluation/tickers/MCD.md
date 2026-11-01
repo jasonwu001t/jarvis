@@ -87,3 +87,4 @@ observation position: the rules are arithmetic, the call is the traffic claim (`
   against the 8-Ks, 10-K, Treasury curve and prices; built the comps extractor (33 quarters, 2018-Q4 → 2026-Q2).
   Full model (inputs.json, narrative, monitor) not built.
 - 2026-10-25: the report's model table now shows the U.S. / International Operated Markets / IDL & Corporate rows from the `segments` block (skill fix: the rows were META's); checks name their rule (standard). Monitor rerun: 265 / 334 / 402 unchanged.
+- 2026-10-31: skill fix (audit #95 review): atlas serves MCD no pretax line and no interest-income fact, so a refill's forecast other income carried 0; it now charges the interest expense at its TTM rate on the carried debt, with a WARNING (a scratch refill: −1,631 a year, 3.86% of average debt on 42,215). The full model is not built here.

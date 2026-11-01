@@ -77,7 +77,11 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
   },
   "segment_axis": null,                                     // optional, read by fill_from_atlas.py: which axis of a 6-K filer's split becomes
                                                             //   the segments (geography, platform, product, technology); null = platform,
-                                                            //   else product; the other axes are listed in _sources.notes, never summed
+                                                            //   product, then any axis but geography and technology, the first whose
+                                                            //   members add up to revenue within 2% in their latest quarter, else the
+                                                            //   first of them; the other axes are listed in _sources.notes, never summed;
+                                                            //   an axis the split does not serve (or any name on a US filer) gives no
+                                                            //   segments, with a WARNING
   "periods": [{"key": 20240, "year": 2024, "q": 0, "status": "actual"}, ..., {"key": 20280, "year": 2028, "q": 0, "status": "consensus"}],
                                                             // consensus FYs beyond FY+2 (e.g. 20290..20310) extend the explicit period
   "lines": {                                                // {period key: value}; actual periods and the consensus block together
