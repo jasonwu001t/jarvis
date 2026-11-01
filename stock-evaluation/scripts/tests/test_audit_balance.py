@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _synth  # noqa: E402
 import backtest  # noqa: E402
+import fill_from_atlas  # noqa: E402
 import monitor  # noqa: E402
 import valuation_engine as mm  # noqa: E402
 from test_onboarding_faults import FillCase  # noqa: E402
@@ -76,7 +77,21 @@ class ApplyActualsBridge(unittest.TestCase):
         self.inp["lines"]["cash_and_st_investments"]["20262"] = 2500.0
         notes = self.apply(world, {20263: {}})
         self.assertEqual(self.line("cash_and_st_investments"), 2500.0)        # 20262's actual, not the 2000 consensus
-        self.assertTrue(any(n.startswith("WARNING") and "carried from 20262" in n for n in notes), notes)
+        self.assertTrue(any("cash_and_st_investments carried from 20262" in n for n in notes), notes)
+        # the carry is kept in inputs.json, so every later run warns until a fill or a stated quarter replaces it
+        self.assertEqual(self.inp["_bridge_carried"], {"20263": {"cash_and_st_investments": "20262"}})
+        warnings = mm.Model(self.inp).run()["warnings"]
+        self.assertTrue(any("cash_and_st_investments carried from 20262" in w for w in warnings), warnings)
+
+    def test_total_debt_fallback_warns_unless_ifrs(self):
+        world = _synth.AtlasWorld(latest=(2026, 3), cash=4000.0, debt=1000.0)    # no long_term_debt_incl_current
+        notes = self.apply(world, {20263: {}})
+        self.assertEqual(self.line("debt"), 1000.0)
+        self.assertTrue(any(n.startswith("WARNING") and "total_debt" in n for n in notes), notes)
+        # an IFRS filer's total_debt holds its current portion: a note, not a warning (as the fill does)
+        notes = monitor.apply_actuals(_synth.engine_inputs(fy=2026, q=2), world.kpis, [20263], {20263: {}}, company_type="ifrs")
+        self.assertTrue(any("total_debt" in n for n in notes), notes)
+        self.assertFalse(any(n.startswith("WARNING") and "total_debt" in n for n in notes), notes)
 
 
 class ApplyActualsReport(unittest.TestCase):
@@ -92,8 +107,8 @@ class ApplyActualsReport(unittest.TestCase):
 
         def offline(*a, **kw):
             raise RuntimeError("offline")
-        saved = monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_kpis
-        monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_kpis = tmp, offline, offline, lambda t: world.kpis
+        saved = monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_fundamentals
+        monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_fundamentals = tmp, offline, offline, world.fundamentals
         try:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 monitor.main(["--apply-actuals"])
@@ -102,7 +117,7 @@ class ApplyActualsReport(unittest.TestCase):
             with open(os.path.join(tmp, "inputs.json"), encoding="utf-8") as fh:
                 saved_inputs = json.load(fh)
         finally:
-            monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_kpis = saved
+            monitor.HERE, monitor.get, monitor.atlas_data.get, monitor.live_fundamentals = saved
             shutil.rmtree(tmp)
         self.assertIn("## Warnings", md)
         self.assertIn("cash_and_st_investments", md.split("## Warnings")[1].split("\n## ")[0])
@@ -128,52 +143,77 @@ class FillCashAndDebt(FillCase):
 
     def world(self):
         return _synth.AtlasWorld(latest=(2026, 2), cash=4000.0, debt=1000.0, balances={
-            "cash_and_short_term_investments": lambda y, i: 9000.0 if y >= 2025 else None,
+            "cash_and_short_term_investments": lambda y, i: 9000.0 if y >= 2025 and (y, i) != (2026, 1) else None,
             "long_term_debt_incl_current": lambda y, i: 1300.0 if y >= 2024 else None},
             facts={"MarketableSecuritiesCurrent": {"2023-03-31": 700.0},     # last tagged in 2023
                    "DebtSecuritiesCurrent": {"2024-06-30": 2500.0},          # a concept atlas's composite does not read
                    "EquityMethodInvestments": {"2024-12-31": 50.0}})         # one 10-K balance, then no more
 
     def test_composite_cash_debt_with_current_portion_and_no_stale_carry(self):
+        path = os.path.join(self.dir, "inputs.json")
+        with open(path, encoding="utf-8") as fh:
+            scaffold = json.load(fh)
+        scaffold["_bridge_carried"] = {"20262": {"cash_and_st_investments": "20261"}}   # an --apply-actuals carry
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(scaffold, fh)
         inp = self.fill(self.world())
+        self.assertNotIn("_bridge_carried", inp)       # the fill states every line again
         L = {line: {int(k): v for k, v in vals.items()} for line, vals in inp["lines"].items()}
         cash = L["cash_and_st_investments"]
         self.assertEqual(cash[20262], 9000.0)          # atlas's cash and short-term investments, not 4000 + a 2023 balance
         self.assertEqual(cash[20231], 4700.0)          # cash plus the concept stated at exactly that date
         self.assertEqual(cash[20242], 6500.0)
-        self.assertEqual(cash[20232], 4000.0)          # nothing stated at that date: cash alone, said so
+        self.assertEqual(cash[20232], 4000.0)          # nothing stated at that date: cash alone
+        self.assertEqual(cash[20261], 4000.0)          # the same in the last four quarters, said so
         self.assertEqual(L["debt"][20262], 1300.0)     # long-term debt with its current portion
         self.assertEqual(L["debt"][20231], 1000.0)     # the noncurrent total_debt where nothing else is stated, said so
         self.assertEqual(L["investments"][20254], 50.0)    # the 10-K balance within the year
         self.assertEqual(L["investments"][20262], 0.0)     # not carried forever
         notes = inp["_sources"]["notes"]
-        self.assertTrue(any(n.startswith("WARNING") and "cash alone" in n and "20232" in n for n in notes), notes)
+        cash_alone = [n for n in notes if n.startswith("WARNING") and "cash alone" in n]
+        self.assertEqual(len(cash_alone), 1, notes)
+        self.assertIn("20261", cash_alone[0])
+        self.assertNotIn("20232", cash_alone[0])      # only the quarters the bridge and the cash yield read
         self.assertTrue(any(n.startswith("WARNING") and "total_debt" in n and "20231" in n for n in notes), notes)
         self.assertTrue(any(n.startswith("WARNING") and "EquityMethodInvestments" in n for n in notes), notes)
 
 
 class BacktestBalanceVintage(unittest.TestCase):
     """#251: the backtest read sec.company_facts at its latest vintage, so a fiscal-year-end balance that a later filing
-    repeated looked unknown on the Q4 decision day and the Q3 balance stood in."""
+    repeated looked unknown on the Q4 decision day and the Q3 balance stood in. #21 in the backtest: atlas serves the
+    balance KPIs (cash, debt, equity) as 'instant' points under period labels, and fetch_all kept only 'quarterly' and
+    'annual' points, so cash, debt and equity were empty on every decision day."""
 
     # (period end, USD m, knowledge time): the year-end balances filed with the 10-K on 2026-01-29, repeated (and
     # recast) in a July filing nobody could read on the decision day
     VINTAGES = {"MarketableSecuritiesCurrent": [("2025-09-30", 300.0, "2025-10-30"), ("2025-12-31", 500.0, "2026-01-29"),
                                                 ("2025-12-31", 520.0, "2026-07-30")],
                 "EquityMethodInvestments": [("2025-09-30", 60.0, "2025-10-30"), ("2025-12-31", 80.0, "2026-01-29"),
-                                            ("2025-12-31", 85.0, "2026-07-30")]}
+                                            ("2025-12-31", 85.0, "2026-07-30")],
+                "OtherLongTermInvestments": [("2025-12-31", 40.0, "2026-01-29")]}   # the folder's balance_mapping adds it
 
     def get(self, path, **params):
         if path.startswith("/api/v1/filings/"):
             kpis = {}
+
+            def put(kid, period, kind, end, v, part="quarterly"):
+                kpis.setdefault(kid, {"id": kid, "quarterly": [], "annual": []})[part].append(
+                    {"period": period, "kind": kind, "end": end, "value": v * 1e6})
             for y in (2023, 2024, 2025):
                 for i in range(1, 5):
+                    end = _synth.quarter_end(y, i)
                     for kid, v in (("revenue", 1000.0), ("operating_income", 300.0), ("pretax_income", 300.0),
                                    ("income_tax_expense", 45.0), ("net_income", 255.0), ("shares_diluted", 100.0),
-                                   ("capex", 60.0), ("depreciation_amortization", 50.0), ("share_comp", 30.0),
-                                   ("cash", 4000.0), ("total_debt", 1000.0)):
-                        kpis.setdefault(kid, {"id": kid, "quarterly": [], "annual": []})["quarterly"].append(
-                            {"period": f"{y}-Q{i}", "kind": "quarterly", "end": _synth.quarter_end(y, i), "value": v * 1e6})
+                                   ("capex", 60.0), ("depreciation_amortization", 50.0), ("share_comp", 30.0)):
+                        put(kid, f"{y}-Q{i}", "quarterly", end, v)
+                    # the balance KPIs as atlas serves them: 'instant' points labelled 2025-Q4, the year end also FY2025
+                    for kid, v in (("cash", 4000.0), ("total_debt", 1000.0), ("equity", 8000.0),
+                                   ("long_term_debt_incl_current", 1200.0 if (y, i) == (2025, 4) else None)):
+                        if v is not None:
+                            put(kid, f"{y}-Q{i}", "instant", end, v)
+                            if i == 4:
+                                put(kid, f"FY{y}", "instant", end, v, "annual")
+            put("shares_outstanding_cover", "2026-01-27", "instant", "2026-01-27", 100.0)   # date-labelled: skipped (#23)
             return {"data": {"xbrl": {"kpis": list(kpis.values())}}}
         if path.startswith("/api/v1/market/prices/"):
             days = [dt.date(2025, 12, 1) + dt.timedelta(days=n) for n in range(90)]
@@ -196,17 +236,74 @@ class BacktestBalanceVintage(unittest.TestCase):
         self.as_of = []
         saved = backtest.get, backtest.guid.collect
         backtest.get, backtest.guid.collect = self.get, lambda *a, **kw: []
+        template = _synth.engine_inputs(fy=2025, q=4)
+        template["balance_mapping"] = {"investment_concepts": ["EquityMethodInvestments", "OtherLongTermInvestments"]}
         try:
-            data = backtest.fetch_all("ZZZ", "/nonexistent", "2025-12-01")
+            data = backtest.fetch_all("ZZZ", "/nonexistent", "2025-12-01",
+                                      investment_concepts=template["balance_mapping"]["investment_concepts"])
             evals = backtest.release_evals("ZZZ", data, "2025-12-01")
         finally:
             backtest.get, backtest.guid.collect = saved
         self.assertEqual(evals, [("2026-01-30", 20254)])          # the release plus two trading days
-        inp = backtest.build_inputs(_synth.engine_inputs(fy=2025, q=4), data, 20254, "2026-01-30", "momentum")
+        self.assertEqual(data["kpis"]["shares_outstanding_cover"], [])
+        inp = backtest.build_inputs(template, data, 20254, "2026-01-30", "momentum")
         L = inp["lines"]
         self.assertEqual(L["cash_and_st_investments"]["20254"], 4500.0)    # 4000 + the 2025-12-31 securities, not 2025-09-30's
-        self.assertEqual(L["investments"]["20254"], 80.0)
+        self.assertEqual(L["cash_and_st_investments"]["20253"], 4300.0)
+        self.assertEqual(L["debt"]["20254"], 1200.0)                       # long-term debt with its current portion
+        self.assertEqual(L["debt"]["20253"], 1000.0)                       # total_debt where nothing else is stated
+        self.assertEqual(L["equity"]["20254"], 8000.0)
+        self.assertEqual(L["investments"]["20254"], 120.0)                 # 80 + 40, the folder's investment concepts
         self.assertEqual(set(self.as_of), {"2026-02-13"})                  # read as atlas knew them then (+14 days)
+
+
+class TenKBalanceCarry(unittest.TestCase):
+    """#21: a balance only the 10-K states is carried at most about a year. A 52/53-week filer's prior year end is 371
+    days before a 53-week year's end, which a 366-day limit dropped to 0 at a Q4 read made before the new 10-K."""
+
+    def test_a_53_week_years_prior_year_end_still_counts(self):
+        world = _synth.AtlasWorld(facts={"FinanceLeaseLiability": {"2024-12-26": 50.0},
+                                         "EquityMethodInvestments": {"2024-12-26": 30.0, "2023-12-28": 20.0}})
+        saved = monitor.get
+        monitor.get = world.get
+        try:
+            ex = monitor.live_balance_sheet_extras("ZZZ", "2026-01-01")      # FY end 371 days after 2024-12-26
+        finally:
+            monitor.get = saved
+        self.assertEqual(ex["FinanceLeaseLiability"]["value"], 50.0)
+        self.assertEqual(ex["EquityMethodInvestments"]["value"], 30.0)
+        self.assertEqual(fill_from_atlas.latest_at({"2024-12-26": 50.0}, "2026-01-01", monitor.CARRY_DAYS), 50.0)
+        self.assertEqual(fill_from_atlas.latest_at({"2023-12-28": 20.0}, "2026-01-01", monitor.CARRY_DAYS), 0.0)
+
+
+class NativeCurrencyFacts(unittest.TestCase):
+    """#21: the raw sec.company_facts balances (short-term investments, investments, finance leases) join USD KPIs; a
+    US GAAP filer that reports in its own currency states them in that unit, which was read as USD millions."""
+
+    def world(self):
+        world = _synth.AtlasWorld(latest=(2026, 3), facts={"ShortTermInvestments": {"2026-09-30": 2500.0},
+                                                           "MarketableSecuritiesCurrent": {"2026-09-30": 700.0}})
+        rows = world.facts_rows
+
+        def facts_rows(metric):
+            return [{**r, "unit": "CNY" if metric == "ShortTermInvestments" else "USD"} for r in rows(metric)]
+        world.facts_rows = facts_rows
+        return world
+
+    def test_a_balance_in_another_currency_is_not_read_as_usd(self):
+        world = self.world()
+        saved = monitor.get, fill_from_atlas.get
+        monitor.get = fill_from_atlas.get = world.get
+        try:
+            ex = monitor.live_balance_sheet_extras("ZZZ", "2026-09-30")
+            sti = fill_from_atlas.facts("ZZZ", "ShortTermInvestments", "2020-01-01")
+            ms = fill_from_atlas.facts("ZZZ", "MarketableSecuritiesCurrent", "2020-01-01")
+        finally:
+            monitor.get, fill_from_atlas.get = saved
+        self.assertIsNone(ex["ShortTermInvestments"]["value"])
+        self.assertEqual(ex["MarketableSecuritiesCurrent"]["value"], 700.0)
+        self.assertEqual(sti, {})
+        self.assertEqual(ms, {"2026-09-30": 700.0})
 
 
 if __name__ == "__main__":

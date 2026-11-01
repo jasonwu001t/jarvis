@@ -60,11 +60,19 @@ SHARES = {"shares_diluted"}
 # long_term_debt_incl_current) do not state a period. Short-term investments: the first one stated at exactly the
 # balance date (the composite reads the first three; NVIDIA's DebtSecuritiesCurrent from 2026 is outside it).
 # Investments (inputs.balance_mapping.investment_concepts) and finance leases, which many filers state only in the
-# 10-K: the latest balance at most CARRY_DAYS old, so a concept the filer stopped tagging is not carried forever.
+# 10-K: the latest balance at most CARRY_DAYS old, so a concept the filer stopped tagging is not carried forever. A
+# fiscal year and two weeks: a 52/53-week filer's prior year end is 371 days before a 53-week year's end.
 SHORT_TERM_INVESTMENT_CONCEPTS = ["ShortTermInvestments", "MarketableSecuritiesCurrent",
                                   "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "DebtSecuritiesCurrent"]
 DEFAULT_INVESTMENT_CONCEPTS = ["EquityMethodInvestments", "EquitySecuritiesWithoutReadilyDeterminableFairValueAmount"]
-CARRY_DAYS = 366
+CARRY_DAYS = 380
+
+
+def balance_instants(rows: list[dict]) -> list[tuple[str, float]]:
+    """(period end, USD m) of the sec.company_facts instants in `rows`, oldest first. A row in another unit (a US GAAP
+    filer reporting in its own currency) is left out: these balances join atlas's USD KPIs."""
+    return sorted((r["period_end"], r["value"] / 1e6) for r in rows
+                  if r.get("period_start") is None and r["value"] is not None and r.get("unit", "USD") == "USD")
 
 
 def get(path: str, **params) -> dict:
@@ -126,11 +134,10 @@ def live_beta(ticker: str, bench: str = "SPY", weeks: int = 104) -> dict:
     return {"raw": raw, "adjusted": 0.67 * raw + 0.33, "n_weeks": len(ra), "from": str(dates[0]), "to": str(dates[-1])}
 
 
-def live_kpis(ticker: str) -> dict[str, dict]:
-    """{kpi id: {period key: value}} from atlas's /research/fundamentals in USD millions (IFRS filers converted by atlas;
-    per-share values per listed share, share counts in millions of listed-share equivalents)."""
-    out = atlas_data.fundamentals(ticker, currency="USD")["kpis"]
-    return out
+def live_fundamentals(ticker: str) -> dict:
+    """atlas's /research/fundamentals: 'kpis' {kpi id: {period key: value}} in USD millions (IFRS filers converted by
+    atlas; per-share values per listed share, share counts in millions of listed-share equivalents) and 'company_type'."""
+    return atlas_data.fundamentals(ticker, currency="USD")
 
 
 def live_balance_sheet_extras(ticker: str, period_end: str, investment_concepts=None) -> dict:
@@ -147,8 +154,8 @@ def live_balance_sheet_extras(ticker: str, period_end: str, investment_concepts=
         except Exception as exc:  # noqa: BLE001
             out[metric] = {"value": None, "error": str(exc)[:80]}
             continue
-        vals = sorted((r["period_end"], r["value"]) for r in rows if r.get("period_start") is None and r["value"] is not None)
-        out[metric] = {"value": vals[-1][1] / 1e6, "end": vals[-1][0]} if vals else {"value": None}
+        vals = balance_instants(rows)
+        out[metric] = {"value": vals[-1][1], "end": vals[-1][0]} if vals else {"value": None}
     return out
 
 
@@ -264,15 +271,17 @@ def actual_vs_consensus(inputs: dict, kpis: dict, key: int) -> list[dict]:
     return rows
 
 
-def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict) -> list[str]:
-    """Write the reported quarter(s) into inputs.json lines and roll the as-of markers. Returns notes. A bridge line with
-    nothing stated for the quarter is carried from the prior reported quarter, never left at the consensus value or 0,
-    and its note starts WARNING (main() adds those to the report's warnings, audit #20)."""
+def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict, company_type: str = "default") -> list[str]:
+    """Write the reported quarter(s) into inputs.json lines and roll the as-of markers. Returns notes; main() adds those
+    starting WARNING to the report's warnings. A bridge line with nothing stated for the quarter is carried from the prior
+    reported quarter, never left at the consensus value or 0, and inputs['_bridge_carried'] records it, so the engine
+    warns on every run until a fill or a quarter that states it replaces it (audit #20)."""
     notes = []
     L = inputs["lines"]
     inv_concepts = (inputs.get("balance_mapping") or {}).get("investment_concepts", DEFAULT_INVESTMENT_CONCEPTS)
     for key in keys:
         prev = inputs["as_of"]["latest_reported_fy"] * 10 + inputs["as_of"]["latest_reported_q"]
+        carried = {}
         end = kpis["revenue"][key]["end"]
         for kpi, line in KPI_TO_LINE.items():
             v = kpis.get(kpi, {}).get(key, {}).get("value")
@@ -291,7 +300,8 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
                     notes.append(f"{key}: {line} not stated ({why}) and no prior quarter to carry")
                     return
                 if v:
-                    notes.append(f"WARNING: {key}: {line} carried from {prev} ({why})")
+                    carried[line] = str(prev)
+                    notes.append(f"{key}: {line} carried from {prev} ({why})")
             L.setdefault(line, {})[str(key)] = round(v, 6)
 
         # cash: atlas's cash and short-term investments, else cash plus the first short-term investments stated at the date
@@ -306,7 +316,9 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
         ltd = kpi_at("long_term_debt_incl_current")
         if ltd is None and kpi_at("total_debt") is not None:
             ltd = kpi_at("total_debt")
-            notes.append(f"{key}: debt from atlas's total_debt (no long_term_debt_incl_current; a US GAAP filer's current portion is not in it)")
+            notes.append(f"{key}: debt from atlas's total_debt (no long_term_debt_incl_current; an IFRS filer's total_debt holds its current portion)"
+                         if company_type == "ifrs" else
+                         f"WARNING: {key}: debt is atlas's total_debt, the noncurrent long-term debt (no long_term_debt_incl_current)")
         fl = ex.get("FinanceLeaseLiability") or {}
         bridge("debt", None if ltd is None else ltd + (fl.get("value") or 0.0), f"no long-term debt stated at {end}")
         if ltd is not None:
@@ -316,6 +328,10 @@ def apply_actuals(inputs: dict, kpis: dict, keys: list[int], extras_by_key: dict
                 notes.append(f"{key}: finance-lease liability carried forward from {fl['end']} (10-K only)")
         inv = [stated(c) for c in inv_concepts if stated(c) is not None]
         bridge("investments", sum(inv) if inv else None, f"none of {', '.join(inv_concepts)} stated within a year")
+        if carried:
+            inputs["_bridge_carried"] = {str(key): carried}
+        else:
+            inputs.pop("_bridge_carried", None)
         L.setdefault("minority_interest", {})[str(key)] = 0.0
         # the template's "other income" = pretax - operating income
         if L.get("pretax_income", {}).get(str(key)) is not None and L.get("operating_income", {}).get(str(key)) is not None:
@@ -576,7 +592,8 @@ def main(argv: list[str]) -> int:
             except Exception as exc:  # noqa: BLE001
                 live[name] = {"error": str(exc)}
         try:
-            kpis = live_kpis(ft)
+            F = live_fundamentals(ft)
+            kpis = F["kpis"]
             live["_kpis"] = kpis
             new_q = detect_new_quarters(inputs, kpis)
             extras = {}
@@ -585,7 +602,7 @@ def main(argv: list[str]) -> int:
                 extras[key] = live_balance_sheet_extras(ft, kpis["revenue"][key]["end"],
                                                         (inputs.get("balance_mapping") or {}).get("investment_concepts"))
             if apply and new_q:
-                notes = apply_actuals(inputs, kpis, new_q, extras)
+                notes = apply_actuals(inputs, kpis, new_q, extras, F.get("company_type", "default"))
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(inputs, fh, indent=1, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001

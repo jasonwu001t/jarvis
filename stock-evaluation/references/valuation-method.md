@@ -71,7 +71,8 @@ DCF lines then model only the core business (TSLA: cars), with the history conso
 
 Equity = EV − net debt (interest-bearing debt incl. its current portion and finance leases − cash and
 short-term investments) − minorities + investments (equity-method + non-marketable); with the bridge on,
-the engine warns when debt, cash or investments is missing at the latest quarter (it would read 0). Per
+the engine warns when debt, cash or investments is missing at the latest quarter (it would read 0) or was
+carried from the prior quarter by `monitor --apply-actuals` (`_bridge_carried`). Per
 diluted share (latest quarter),
 × (1 + cost of equity) to roll 12 months forward, − the next four quarters' dividends per share.
 `blend.equity_bridge: false` skips the bridge (equity = DCF total), `blend.dcf_roll_forward: false`

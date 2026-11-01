@@ -93,8 +93,9 @@ and a null cost of debt (monitor crash).
    derive Q4 averages from the 10-K (annual x4 − YTD x3) or serve the 10-K's own Q4 figure; serve the annual.
 2. `total_debt` blank for Q2-Q3 FY2026: Micron tags `LongTermDebt` only in the 10-K and Q1, `LongTermDebtAndCapitalLeaseObligations`
    + `DebtCurrent` every quarter (AVGO finding 3 again). Fix: add both to the chain / composite.
-3. The cash composite looks for `MarketableSecuritiesCurrent`; Micron tags `AvailableForSaleSecuritiesDebtSecuritiesCurrent`
-   ($5.1bn) and `...Noncurrent` ($30.0bn). Fix: AFS tags in the cash chain; a `long_term_investments` KPI for the noncurrent one.
+3. Micron tags `AvailableForSaleSecuritiesDebtSecuritiesCurrent` ($5.1bn) and `...Noncurrent` ($30.0bn). The current one is
+   read by atlas's `cash_and_short_term_investments`, which the fill and `--apply-actuals` take since audit #21. The
+   noncurrent one has no KPI: list it in `balance_mapping.investment_concepts`. Fix: a `long_term_investments` KPI for it.
 4. `interest_expense` is net of capitalised interest (FY2026 $106m on $5-14bn of debt): TTM interest / debt is not a cost of
    debt. Fix: the fill floors the derived rate with a coupon source (FRED Baa) and says which it used.
 5. `rpo` ($134bn, `RevenueRemainingPerformanceObligation`) is served and not carried (AVGO 13). Keyed as a line here so the

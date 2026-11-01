@@ -30,6 +30,7 @@ import copy
 import datetime as dt
 import json
 import os
+import re
 import statistics
 import sys
 import urllib.parse
@@ -40,11 +41,11 @@ import valuation_engine as mm  # noqa: E402
 import overlays  # noqa: E402
 import guidance as guid  # noqa: E402
 from monitor import (KPI_TO_LINE, PER_SHARE, SHARES, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
-                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS)
+                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS, balance_instants)
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
-EXTRA_CONCEPTS = SHORT_TERM_INVESTMENT_CONCEPTS + DEFAULT_INVESTMENT_CONCEPTS + ["FinanceLeaseLiability"]
 RELEASE_ALLOWANCE_DAYS = 14   # balance facts as of evaluation date + this (the 10-Q with the release's balance sheet)
+PERIOD_LABEL = re.compile(r"\d{4}-Q[1-4]|FY\d{4}")
 
 
 def get(path: str, **params) -> dict:
@@ -64,15 +65,16 @@ VARIANTS = {
 
 
 # ------------------------------------------------------------------------------------------ data
-def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2) -> dict:
+def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2, investment_concepts=None) -> dict:
     kpis = get(f"/api/v1/filings/ticker/{ticker}", top_n=1)["data"]["xbrl"]["kpis"]
     K = {}
     for k in kpis:
         rows = []
         for r in k.get("quarterly", []) + k.get("annual", []):
-            # Only period-labelled points: atlas also serves date-labelled 'instant' points (shares_outstanding_cover,
+            # Only period-labelled points, whatever their kind: the balance KPIs (cash, debt, equity) are 'instant' points
+            # labelled '2026-Q2' / 'FY2025'; atlas also serves date-labelled instants (shares_outstanding_cover,
             # '2026-07-22'), which period_key cannot read and nothing here uses (audit #23).
-            if r["value"] is None or r.get("kind") not in ("quarterly", "annual"):
+            if r["value"] is None or not PERIOD_LABEL.fullmatch(r.get("period") or ""):
                 continue
             v = r["value"] if k["id"] in PER_SHARE else r["value"] / 1e6
             rows.append({"key": period_key(r["period"]), "end": r["end"], "filed": r.get("filed"), "value": v, "kind": r["kind"]})
@@ -89,14 +91,14 @@ def fetch_all(ticker: str, folder: str, since: str, lag_days: int = 2) -> dict:
     # knowledge_time is the latest filing that repeated a value (a year-end balance looked unknown until then, audit #251)
     data["evals"] = release_evals(ticker, data, since, lag_days)
     data["extras"] = {}
+    concepts = SHORT_TERM_INVESTMENT_CONCEPTS + list(investment_concepts or DEFAULT_INVESTMENT_CONCEPTS) + ["FinanceLeaseLiability"]
     for d, _ in data["evals"]:
         as_of = (dt.date.fromisoformat(d) + dt.timedelta(days=RELEASE_ALLOWANCE_DAYS)).isoformat()
         data["extras"][d] = {}
-        for concept in EXTRA_CONCEPTS:
+        for concept in concepts:
             rows = get("/api/v1/data/datasets/sec.company_facts/rows", start="2020-01-01", limit=500, as_of=as_of,
                        **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
-            data["extras"][d][concept] = [{"end": r["period_end"], "value": r["value"] / 1e6}
-                                          for r in rows if r.get("period_start") is None and r["value"] is not None]
+            data["extras"][d][concept] = [{"end": e, "value": v} for e, v in balance_instants(rows)]
     return data
 
 
@@ -159,7 +161,8 @@ def build_inputs(template: dict, data: dict, eval_key: int, eval_date: str, vari
     sti_at = lambda end: next((x for x in (ext_at(c, end, 0) for c in SHORT_TERM_INVESTMENT_CONCEPTS) if x is not None), 0.0)
     L["cash_and_st_investments"] = {**{k: cash[k] + sti_at(ends[k]) for k in cash if k in ends}, **csti}
     L["debt"] = {k: debt[k] + (ext_at("FinanceLeaseLiability", ends[k], CARRY_DAYS) or 0.0) for k in debt if k in ends}
-    L["investments"] = {k: sum(ext_at(c, ends[k], CARRY_DAYS) or 0.0 for c in DEFAULT_INVESTMENT_CONCEPTS) for k in ends}
+    inv_concepts = (template.get("balance_mapping") or {}).get("investment_concepts", DEFAULT_INVESTMENT_CONCEPTS)
+    L["investments"] = {k: sum(ext_at(c, ends[k], CARRY_DAYS) or 0.0 for c in inv_concepts) for k in ends}
     L["minority_interest"] = {k: 0.0 for k in ends}
     L["other_income"] = {k: L["pretax_income"][k] - L["operating_income"][k] for k in L["pretax_income"] if k in L["operating_income"]}
     L["adjustments"] = {k: 0.0 for k in L["net_income"]}
@@ -520,7 +523,8 @@ def main(argv: list[str]) -> int:
     if lag < 1:
         print(f"--lag must be at least 1 (got {lag}): a decision is made a trading day or more after the release")
         return 2
-    data = fetch_all(ticker, folder, since, lag_days=lag)
+    data = fetch_all(ticker, folder, since, lag_days=lag,
+                     investment_concepts=(template.get("balance_mapping") or {}).get("investment_concepts"))
     evals = data["evals"]
     results = {}
     cache = {}

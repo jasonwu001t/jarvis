@@ -10,10 +10,11 @@ Keeps everything the analyst sets (scenarios, adjustments, rules, thesis, blend 
 lines, segments, as_of and the price. The consensus block it writes is labelled as a guidance street in
 as_of.consensus_source: replace it with real sell-side consensus when you have it. Balance sheet: cash = atlas's
 cash and short-term investments, else cash plus the first short-term-investment concept stated at exactly the period
-end, else cash alone (a WARNING note names the periods); debt = long-term debt with its current portion, else the
-noncurrent total_debt (WARNING), plus finance-lease liabilities; investments = the XBRL concepts listed in
-inputs.balance_mapping.investment_concepts (default equity-method + non-marketable equity). A balance only the 10-K
-states (finance leases, investments) is carried at most a year (WARNING once a concept stops).
+end, else cash alone (a WARNING note names those of the last four quarters); debt = long-term debt with its current
+portion, else the noncurrent total_debt (WARNING), plus finance-lease liabilities; investments = the XBRL concepts
+listed in inputs.balance_mapping.investment_concepts (default equity-method + non-marketable equity). A balance only
+the 10-K states (finance leases, investments) is carried at most a fiscal year and two weeks (WARNING once a concept
+stops). Raw company-facts balances count only in USD, the unit of the KPIs they join.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import guidance as guid  # noqa: E402
 import atlas_data  # noqa: E402
 from monitor import (KPI_TO_LINE, PER_SHARE, period_key, SHORT_TERM_INVESTMENT_CONCEPTS,  # noqa: E402
-                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS)
+                     DEFAULT_INVESTMENT_CONCEPTS, CARRY_DAYS, balance_instants)
 
 ATLAS = os.environ.get("ATLAS_URL", "http://127.0.0.1:8000").rstrip("/")
 
@@ -48,11 +49,7 @@ def kpis(ticker: str) -> dict:
 
 def facts(ticker: str, concept: str, since: str) -> dict:
     rows = get("/api/v1/data/datasets/sec.company_facts/rows", start=since, limit=500, **{"eq.ticker": ticker, "eq.metric": concept})["data"]["rows"]
-    out = {}
-    for r in rows:
-        if r.get("period_start") is None and r["value"] is not None:
-            out[r["period_end"]] = r["value"] / 1e6
-    return out
+    return dict(balance_instants(rows))
 
 
 def latest_at(series: dict, end: str, max_days: int):
@@ -158,7 +155,9 @@ def main(argv: list[str]) -> int:
     # the period end (never an older balance); else cash alone, said so. Debt: with its current portion; else the
     # noncurrent total_debt, said so (an IFRS filer's total_debt holds its current portion) (audit #21)
     cash, csti = kpi_vals("cash"), kpi_vals("cash_and_short_term_investments")
-    cash_only = sorted(k for k in cash if k % 10 and k not in csti and not any(ends[k] in s for s in sti))
+    # said only for the last four quarters, the ones the bridge and the cash yield read (an IFRS filer's composite
+    # covers recent quarters only, and the US GAAP concepts never exist for it)
+    cash_only = [k for k in qkeys[-4:] if k in cash and k not in csti and not any(ends[k] in s for s in sti)]
     L["cash_and_st_investments"] = {**{k: cash[k] + next((s[ends[k]] for s in sti if ends[k] in s), 0.0) for k in cash}, **csti}
     debt, incl = kpi_vals("total_debt"), kpi_vals("long_term_debt_incl_current")
     noncurrent = sorted(k for k in debt if k % 10 and k not in incl)
@@ -356,6 +355,7 @@ def main(argv: list[str]) -> int:
     inp["periods"] = periods
     inp["lines"] = {line: {str(k): round(v, 6) for k, v in vals.items() if k // 10 >= since_fy - 1} for line, vals in L.items()}
     inp["segments"] = seg_defs
+    inp.pop("_bridge_carried", None)   # every bridge line is stated again: monitor --apply-actuals' carry is gone
     inp["_sources"] = {"fundamentals": f"/research/fundamentals/{ticker}?currency=USD (company_type {F['company_type']}, per_share_divisor {F['per_share_divisor']}, native {F.get('native_unit')})",
                        "segments": seg_src, "guidance": gsrc, "notes": notes, "filled": dt.date.today().isoformat()}
     if F["per_share_divisor"] != 1.0:

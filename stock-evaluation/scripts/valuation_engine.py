@@ -463,8 +463,13 @@ class Model:
         if w["cost_of_debt_source"] != "inputs":
             out["warnings"].append(f"No pretax cost of debt in inputs.json: the WACC uses {w['pretax_cost_of_debt']:.2%} = {w['cost_of_debt_source']}")
         missing = [x for x in ("debt", "cash_and_st_investments", "investments") if not self.has(x, self.latest_key)]
+        carried = (self.i.get("_bridge_carried") or {}).get(str(self.latest_key)) or {}
         if missing and self.i["blend"].get("equity_bridge", True):
             out["warnings"].append(f"Equity bridge: no {', '.join(missing)} at the latest reported quarter ({self.latest_key}) in inputs.json, read as 0")
+        if carried and self.i["blend"].get("equity_bridge", True):
+            out["warnings"].append(f"Equity bridge: {', '.join(f'{x} carried from {k}' for x, k in carried.items())} at the latest "
+                                   f"reported quarter ({self.latest_key}): monitor --apply-actuals found nothing stated; re-fill, or key it in and "
+                                   "drop _bridge_carried from inputs.json")
         for scn in SCENARIOS:
             s = self.scenario_series(scn)
             e = self.extrapolate(scn, s)

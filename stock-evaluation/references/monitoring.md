@@ -126,10 +126,13 @@ claim the analyst's historical track record; one name and one window prove nothi
    house assumed? Did guidance move the FY+1 consensus?
 3. `--apply-actuals` writes the quarter into `inputs.json` and rolls `as_of`: cash = atlas's cash and
    short-term investments (else cash plus the short-term investments stated at the balance date), debt =
-   long-term debt with its current portion + finance leases from the last 10-K (at most a year old),
+   long-term debt with its current portion (US GAAP filers falling back to the noncurrent `total_debt`
+   get a warning) + finance leases from the last 10-K (at most a fiscal year and two weeks old),
    investments = `balance_mapping.investment_concepts` (default equity-method + non-marketable), other
-   income. A bridge line with nothing stated is carried from the prior quarter, never left at the
-   consensus value or 0; that, and cash with no short-term investments, shows under the report's Warnings.
+   income. Cash with no short-term investments shows under that day's Warnings. A bridge line with
+   nothing stated is carried from the prior quarter, never left at the consensus value or 0, and
+   `_bridge_carried` in `inputs.json` records it, so every later report warns until the next fill (or
+   a quarter that states it) replaces it.
 4. Key in the segment split from the press release (`seg:*`, `segoi:*` for the new period), or rerun
    `fill_from_atlas.py` once atlas has the segment facts.
 5. Replace the consensus block (unreported quarters, FY+1, FY+2) and bump `as_of.consensus_date`.
