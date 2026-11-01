@@ -237,15 +237,9 @@ def main(argv: list[str]) -> int:
         return L["operating_income"][k] * (1 - rate)
     L["wc_increase"] = {k: (_nopat(k) + L["d_and_a"].get(k, 0.0) + L["sbc"].get(k, 0.0)) - L["operating_cash_flow"][k]
                         for k in L["operating_cash_flow"] if k in L["operating_income"]}
-    # A quarter where atlas serves no D&A or SBC (a line the filer never tags counts as zero) stays in the lines, since the
-    # engine's realised ROIC and the FY0 sum read a missing quarter as zero (dropped, CRWD's deferred-revenue builds
-    # vanished), but the TTM ratio and the reversion median leave it out (audit #89)
-    has = lambda line, k: k in L[line] or not L[line]
-    wc_served = {k: v for k, v in L["wc_increase"].items() if has("d_and_a", k) and has("sbc", k)}
-    wc_gap = sorted(k for k in L["wc_increase"] if k % 10 and k not in wc_served)
-    if wc_gap:
-        notes.append(f"WARNING: wc_increase in {len(wc_gap)} quarters ({wc_gap[0]}…{wc_gap[-1]}) is derived without the D&A or SBC "
-                     "atlas does not serve there: kept in the lines, left out of the working-capital ratio and median")
+    # A period where atlas serves no D&A or SBC stays in the lines as derived, since the engine's realised ROIC and the FY0
+    # sum read a missing quarter as zero (dropped, CRWD's deferred-revenue builds vanished); the street's ratio and median
+    # take the missing line at its TTM ratio to revenue (wc_fit below)
     for name in ("dps", "dividends_total", "buybacks", "finance_lease_additions"):
         L.setdefault(name, {})
     # ---- segments: the XBRL segment facts through atlas; a folder's segments.py only as a fallback, said out loud
@@ -342,13 +336,25 @@ def main(argv: list[str]) -> int:
     g_capex = ratio("capex", "capex", lag=10, default=1 + g_ttm) - 1
     margin = ratio("operating_income")
     tax = min(0.30, max(0.10, ratio("income_tax", "pretax_income", default=0.15, positive=True)))
-    da_r, sbc_r, wc_r = ratio("d_and_a"), ratio("sbc"), ratio("wc_increase", lines=wc_served)
+    da_r, sbc_r = ratio("d_and_a"), ratio("sbc")
+    # The working-capital ratio and median take a missing D&A or SBC (a line the filer never tags counts as zero) at that
+    # TTM ratio to revenue. Leaving the period out kept a partial year of a seasonal line: GOOG's D&A in Q1-Q2 only gave
+    # +3.9% (true about -2%) and no median (audit #89)
+    has = lambda line, k: k in L[line] or not L[line]
+    wc_gap = sorted(k for k in L["wc_increase"] if not (has("d_and_a", k) and has("sbc", k)))
+    wc_fit = {k: v + sum(r * L["revenue"][k] for line, r in (("d_and_a", da_r), ("sbc", sbc_r)) if not has(line, k))
+              for k, v in L["wc_increase"].items() if k in L["revenue"]}
+    if wc_gap:
+        notes.append(f"WARNING: wc_increase in {len(wc_gap)} periods ({wc_gap[0]}…{wc_gap[-1]}) is derived without the D&A or SBC atlas "
+                     f"does not serve there: kept in the lines as derived; the working-capital ratio and median take it at its TTM "
+                     f"ratio to revenue (D&A {da_r:.2%}, SBC {sbc_r:.2%})")
+    wc_r = ratio("wc_increase", lines=wc_fit)
     lease_r = ratio("finance_lease_additions", "capex", absent_ok=True)
     shares = L["diluted_shares"].get(latest) or L["diluted_shares"][max(L["diluted_shares"])]
     dps_q = L["dps"].get(latest, 0.0)
     # working capital: the TTM share of revenue reverts to the median share of the reported fiscal years by FY+2
-    wc_years = sorted(k for k in wc_served if k % 10 == 0 and (k // 10 < fy or q == 4) and L["revenue"].get(k))
-    wc_med = statistics.median(wc_served[k] / L["revenue"][k] for k in wc_years) if wc_years else None
+    wc_years = sorted(k for k in wc_fit if k % 10 == 0 and (k // 10 < fy or q == 4) and L["revenue"][k])
+    wc_med = statistics.median(wc_fit[k] / L["revenue"][k] for k in wc_years) if wc_years else None
     wc_share = lambda y: wc_r if wc_med is None else wc_r + (wc_med - wc_r) * min(1.0, max(0.0, (y - fy) / 2))
     gd = next((r for r in reversed(releases) if r.get("revenue_next_quarter") and r["revenue_next_quarter"]["period_key"] > latest), None)
     # The actuals are GAAP operating income: a non-GAAP operating-income guide is neither beat-adjusted against them nor

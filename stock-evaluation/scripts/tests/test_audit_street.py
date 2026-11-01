@@ -47,7 +47,7 @@ class TtmOverSharedQuarters(FillCase):
         st = inp["_street"]
         self.assertAlmostEqual(st["da_ratio"], 0.05, places=9)
         self.assertAlmostEqual(st["margin_ttm"], 0.30, places=9)
-        self.assertAlmostEqual(st["wc_ratio"], 0.02, places=9)     # a quarter without D&A left out of the ratio
+        self.assertAlmostEqual(st["wc_ratio"], 0.02, places=9)     # a quarter without D&A takes it at the TTM D&A ratio
         self.assertTrue(_warned(inp, "d_and_a"))
         self.assertTrue(_warned(inp, "operating_income"))
 
@@ -76,7 +76,8 @@ class TtmOverSharedQuarters(FillCase):
 
     def test_working_capital_lines_keep_a_quarter_without_d_and_a(self):
         """The actual wc_increase quarter stays in the lines (the engine's realised ROIC and the FY0 sum read a missing one
-        as zero); only the TTM ratio leaves it out (CRWD: a deferred-revenue build, D&A served in two quarters of 21)."""
+        as zero); only the TTM ratio and median take its D&A at the TTM ratio (CRWD: a deferred-revenue build, D&A served
+        in two quarters of 22)."""
         world = _synth.AtlasWorld(latest=(2026, 2), wc_share=lambda y, i: -0.10)
         del world.kpis["depreciation_amortization"][20261]
         inp = self.fill(world)
@@ -86,6 +87,25 @@ class TtmOverSharedQuarters(FillCase):
         self.assertAlmostEqual(inp["_street"]["wc_ratio"], -0.10, places=9)
         self.assertAlmostEqual(L["wc_increase"][20260], sum(L["wc_increase"][20260 + i] for i in range(1, 5)), places=6)
         self.assertTrue(_warned(inp, "wc_increase"))
+
+    def test_a_seasonal_working_capital_ratio_keeps_all_four_quarters(self):
+        """The GOOG / CRWD shape: D&A served in Q1-Q2 only, and in no fiscal year. Leaving those quarters out of the
+        ratio kept the two building quarters of a seasonal line (+10% against a true TTM near -2%) and lost the median;
+        the ratio and median take the missing D&A at the TTM D&A ratio instead."""
+        world = _synth.AtlasWorld(latest=(2026, 2), wc_share=lambda y, i: 0.10 if i <= 2 else -0.14)
+        for k in list(world.kpis["depreciation_amortization"]):
+            if k % 10 in (0, 3, 4):
+                del world.kpis["depreciation_amortization"][k]
+        inp = self.fill(world)
+        st, rev = inp["_street"], {k: v["value"] for k, v in world.kpis["revenue"].items()}
+        last4 = (20253, 20254, 20261, 20262)
+        true_ttm = sum(rev[k] * (0.10 if k % 10 <= 2 else -0.14) for k in last4) / sum(rev[k] for k in last4)
+        self.assertAlmostEqual(st["da_ratio"], 0.05, places=9)
+        self.assertAlmostEqual(st["wc_ratio"], true_ttm, places=9)
+        self.assertAlmostEqual(st["wc_ratio_median"], -0.02, places=9)
+        self.assertEqual(st["wc_median_years"], [2022, 2023, 2024, 2025])
+        self.assertTrue(_warned(inp, "wc_increase", "D&A 5.00%"))
+        self.assertIn(20253, _lines(inp)["wc_increase"])
 
     def test_no_shared_quarter_falls_back_to_the_latest_fiscal_year(self):
         world = _synth.AtlasWorld(latest=(2026, 2))
