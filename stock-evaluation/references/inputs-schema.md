@@ -29,7 +29,8 @@ per share; rates as fractions; period keys `year*10 + quarter` as strings inside
     "base": {...}, "bull": {...}
   },
   "blend": {"dcf_weight": 0.5, "target_position": 0.05,    // house target: fraction from base toward bull (negative: toward bear)
-            "multiple_type": "P/E", "earnings_basis": "GAAP", // GAAP | IFRS | adjusted | non-GAAP, any case; anything else is refused
+            "multiple_type": "P/E", "earnings_basis": "GAAP", // GAAP | IFRS | adjusted | non-GAAP | non_gaap, any case; anything else
+                                                            //   ("reported", null, a typo) is refused with a ValueError
             "convergence_years": 12,                        // 0 = no transition years; ignored (WARNING when non-zero) under exit_pe
             "pe_min_net_margin": 0.01,                      // a scenario whose quarters 5-8 net income is at or below this share of revenue
                                                             //   gets no P/E leg: its weight moves to the DCF, WARNING in the report

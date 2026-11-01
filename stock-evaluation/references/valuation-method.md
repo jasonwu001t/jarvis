@@ -8,7 +8,7 @@ workbook to the dollar. Units: USD millions unless per share; rates as fractions
 
 - **Actuals** through the latest filed quarter (`as_of.latest_reported_fy/q`, `balance_sheet_date`). After a
   Q4 the whole fiscal year is actual: labelled without the "E", charted as history, and the explicit period
-  starts at FY+1.
+  starts at FY+1 (the report's timeline, FCFF chart and DCF table then show no current-year stub).
 - **Explicit period**: the unreported quarters of the current fiscal year plus FY+1 and FY+2, from
   sell-side consensus with the house adjustments layered on.
 - **Transition**: FY+3 … FY+2+N (N = `blend.convergence_years`, 12 in the template), every driver

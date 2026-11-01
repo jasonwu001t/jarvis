@@ -29,8 +29,10 @@ model-year columns are colour-coded and annual columns bold. Charts are Plotly (
 4. **Valuation.** The shared WACC table; for the selected scenario the discounted-cash-flow table,
    the bridge (EV → equity → per share → 12 months forward → target, its years named from the model's own
    timeline), the P/E leg and the blend.
-5. **Sensitivities.** Base DCF on steady ROIC (±5pp, kept above terminal growth) × steady margin (±2pp),
-   centred on the base case so the highlighted cell is the base DCF (exit P/E × WACC in exit-P/E mode);
+5. **Sensitivities.** Base DCF on steady ROIC (±5pp; the low step kept above terminal growth, and left
+   out when that would not put it below the base) × steady margin (±2pp), centred on the base case so the
+   one highlighted cell is the base DCF (exit P/E × WACC in exit-P/E mode, the middle column being the base
+   case's own WACC, a CAPM one included);
    P/E target on multiple × scenario EPS; the risk-free rate. Every grid holds the steady state the engine
    ran on (the anchored ROIC when the anchor binds). *Why:* these are the judgement calls; the reader must
    see what each is worth.

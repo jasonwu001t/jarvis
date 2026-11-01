@@ -1,5 +1,6 @@
 """Engine and report faults of the 2026-10-26 bug audit (#91, #92, #254, #255, #256, #191, #189, #22) on synthetic
 inputs. Run with `python3 -B -m unittest discover -s scripts/tests` from the skill root."""
+import copy
 import json
 import os
 import re
@@ -49,8 +50,20 @@ def chart_data(page):
 
 
 def highlighted(html):
-    """The first highlighted cell of the sensitivity block: the steady ROIC x margin (or exit P/E x WACC) grid's."""
-    return re.search(r"class='num hl'>([^<]+)<", html).group(1)
+    """The highlighted cells of the sensitivity block's first table, the steady ROIC x margin (or exit P/E x WACC) grid;
+    the capex grid after it always highlights its own (x1.0, +0) cell, so it must not be read."""
+    return re.findall(r"class='num hl'>([^<]+)<", html.split("</table>")[0])
+
+
+def without_year(inp, year):
+    """inputs.json as the monitor reads it from disk: the history extend_history() adds for the anchor is not there."""
+    inp = copy.deepcopy(inp)
+    old = {p["key"] for p in inp["periods"] if p["year"] == year}
+    inp["periods"] = [p for p in inp["periods"] if p["key"] not in old]
+    for vals in inp["lines"].values():
+        for k in old:
+            vals.pop(str(k), None)
+    return inp
 
 
 class ReverseDcfGrowthCoversEveryForecastYear(unittest.TestCase):
@@ -163,6 +176,16 @@ class EarningsBasisIsNormalised(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self.pe_target("bogus")
         self.assertIn("bogus", str(caught.exception))
+        for basis in ("reported", None):   # not in thesis_tracker.MODEL_BASES either: refused rather than guessed
+            with self.assertRaises(ValueError):
+                self.pe_target(basis)
+
+    def test_the_tracker_labels_the_basis_the_engine_values(self):
+        # the engine strips and lower-cases the basis; the tracker's label for the P/E leg's EPS must read it the same way
+        for basis, label in (("GAAP", "gaap"), (" Gaap ", "gaap"), ("IFRS ", "gaap"), (" adjusted", "non_gaap"), ("non-GAAP", "non_gaap")):
+            inp = _synth.engine_inputs()
+            inp["blend"]["earnings_basis"] = basis
+            self.assertEqual(tt.MODEL_BASES["q5_q8_eps"](inp), label, basis)
 
 
 class ReportedYearAfterAFourthQuarter(unittest.TestCase):
@@ -185,6 +208,20 @@ class ReportedYearAfterAFourthQuarter(unittest.TestCase):
         col = next(c for c in mm.Model(_synth.engine_inputs(fy=2026, q=2)).period_meta() if c["key"] == 20260)
         self.assertEqual((col["label"], col["status"]), ("FY2026E", "forecast"))
 
+    def test_the_page_does_not_describe_a_current_year_stub(self):
+        def page(q):
+            inp = _synth.engine_inputs(fy=2026, q=q)
+            return report_html.render(inp, mm.Model(inp).run(), {}, [], {}, [], [], None)
+        done = page(4)
+        self.assertNotIn("the DCF uses its second half", chart_data(done)["fc"]["note"])
+        self.assertIn("<span>FY2027 – FY2028</span><b>Explicit period", done)
+        self.assertNotIn("FY2026 H2", done)
+        self.assertNotIn("H2 stub", done)
+        running = page(2)   # a year in progress keeps its stub wording
+        self.assertIn("the DCF uses its second half", chart_data(running)["fc"]["note"])
+        self.assertIn("<span>FY2026 H2 – FY2028</span><b>Explicit period", running)
+        self.assertIn("FY2026 (H2 stub)", running)
+
 
 class ReportFollowsTheAnchor(unittest.TestCase):
     """#189: the report rebuilt its tables, labels and sensitivities from the template steady ROIC, while the DCF it
@@ -206,7 +243,25 @@ class ReportFollowsTheAnchor(unittest.TestCase):
         for k, v in fcff.items():
             self.assertAlmostEqual(charted[f"FY{k // 10}"], v, places=6)
         sn = report_html.sensitivities(inp, out)
-        self.assertEqual(highlighted(report_html.sens_html(sn, out)), report_html.usd(d["target"]))
+        self.assertEqual(highlighted(report_html.sens_html(sn, out)), [report_html.usd(d["target"])])
+        self.assertEqual(len({tuple(round(v, 6) for v in row) for row in sn["grid"]}), len(sn["grid"]))   # the anchor off in reruns
+
+    def test_a_monitor_run_shows_the_anchored_grid_without_the_history(self):
+        # monitor.main runs the engine on extend_history(inputs) and renders with the inputs as read from disk, where the
+        # anchor has too few quarters to fire: the grid must still hold the anchored ROIC the stated DCF used
+        full = anchored_inputs(capex_share=0.20)
+        out = mm.Model(full).run()
+        roic = out["returns"]["steady_roic_base"]
+        self.assertLess(out["returns"]["anchor"]["delta"], 0)
+        raw = without_year(full, 2023)
+        self.assertIsNone(mm.Model(raw).run()["returns"]["anchor"])   # the anchor cannot fire on these inputs
+        sn = report_html.sensitivities(raw, out)
+        html = report_html.sens_html(sn, out)
+        self.assertEqual(highlighted(html), [report_html.usd(out["scenarios"]["base"]["dcf"]["target"])])
+        self.assertIn(f"steady ROIC {report_html.pc(roic, 0)}", html.split("</table>")[0])
+        self.assertEqual(len({tuple(round(v, 6) for v in row) for row in sn["grid"]}), len(sn["grid"]))   # every ROIC row its own value
+        page = report_html.render(raw, out, {}, [], {}, [], [], None)
+        self.assertIn(f"g {report_html.pc(0.035)}, ROIC {report_html.pc(roic, 0)}", page)
 
 
 class SensitivityGridCentresOnTheTicker(unittest.TestCase):
@@ -226,8 +281,32 @@ class SensitivityGridCentresOnTheTicker(unittest.TestCase):
         self.assertIn(0.22, sn["roics"])
         self.assertIn(0.40, sn["margins"])
         html = report_html.sens_html(sn, out)
-        self.assertEqual(highlighted(html), report_html.usd(out["scenarios"]["base"]["dcf"]["target"]))
+        self.assertEqual(highlighted(html), [report_html.usd(out["scenarios"]["base"]["dcf"]["target"])])
         self.assertIn("6-year reinvestment glide", html)
+
+    def test_the_exit_pe_grid_highlights_the_base_under_a_capm_wacc(self):
+        inp = exit_pe_inputs()
+        self.assertNotEqual(inp["wacc"].get("mode"), "manual")
+        out = mm.Model(inp).run()
+        self.assertNotAlmostEqual(out["wacc"]["wacc"], round(out["wacc"]["wacc"], 4), places=6)   # not on a 4-decimal step
+        html = report_html.sens_html(report_html.sensitivities(inp, out), out)
+        self.assertEqual(highlighted(html), [report_html.usd(out["scenarios"]["base"]["dcf"]["target"])])
+
+    def test_a_base_roic_near_terminal_growth_keeps_one_row_per_roic(self):
+        inp = _synth.engine_inputs(roic=(0.03, 0.045, 0.08))
+        out = mm.Model(inp).run()
+        sn = report_html.sensitivities(inp, out)
+        self.assertEqual(list(sn["roics"]), sorted(set(sn["roics"])))
+        self.assertGreater(min(sn["roics"]), inp["scenarios"]["base"]["terminal_growth"])
+        self.assertEqual(highlighted(report_html.sens_html(sn, out)), [report_html.usd(out["scenarios"]["base"]["dcf"]["target"])])
+
+    def test_a_model_without_transition_years_names_no_glide(self):
+        inp = self.inputs()
+        inp["blend"]["convergence_years"] = 0
+        out = mm.Model(inp).run()
+        html = report_html.sens_html(report_html.sensitivities(inp, out), out)
+        self.assertNotIn("reinvestment glide", html)
+        self.assertIn("no transition years", html)
 
     def test_the_bridge_names_this_model_s_years(self):
         inp = self.inputs()

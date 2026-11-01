@@ -153,11 +153,12 @@ def model_table(model: mm.Model, scn: str, T: dict, cols: list[dict], section: s
     return f"<div class='tbl'><table><thead><tr><th>USD m</th>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
 
 
-def dcf_table(d: dict) -> str:
+def dcf_table(d: dict, stub: bool = True) -> str:
+    # after a Q4 no quarter of the current year is left: its zero stub row is not shown (audit #191)
     rows = "".join(
         f"<tr><td>{'FY%d (H2 stub)' % (r['period'] // 10) if i == 0 else 'FY%d' % (r['period'] // 10)}</td><td>{'explicit' if r['stage'] == 1 else 'transition'}</td>"
         f"<td class='{neg_class(r['fcff'])}'>{m(r['fcff'])}</td><td>{r['t']:.2f}</td><td>{r['df']:.4f}</td><td class='{neg_class(r['pv'])}'>{m(r['pv'])}</td></tr>"
-        for i, r in enumerate(d["rows"]))
+        for i, r in enumerate(d["rows"]) if stub or i > 0)
     return (f"<div class='tbl'><table><thead><tr><th>Period</th><th>Stage</th><th>FCFF</th><th>Years from BS date</th><th>Discount factor</th><th>Present value</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div>")
 
@@ -251,7 +252,8 @@ def sensitivities(inputs: dict, out: dict = None) -> dict:
     if exit_pe:
         # the two subjective terminal inputs of the exit-multiple method: the exit P/E and the discount rate
         pe0 = base_in["scenarios"]["base"]["exit_pe"]
-        roics, margins = tuple(pe0 + d for d in (-4, -2, 0, 2, 4)), tuple(round(w0 + d, 4) for d in (-0.01, 0.0, 0.01))
+        # the WACC steps are not rounded, so the middle column is the base case's own WACC (a CAPM one included)
+        roics, margins = tuple(pe0 + d for d in (-4, -2, 0, 2, 4)), tuple(w0 + d for d in (-0.01, 0.0, 0.01))
         grid = []
         for pe in roics:
             row = []
@@ -262,10 +264,12 @@ def sensitivities(inputs: dict, out: dict = None) -> dict:
                 row.append(mm.Model(s).run()["scenarios"]["base"]["dcf"]["target"])
             grid.append(row)
     else:
-        # centred on this ticker's base case (audit #22): ROIC ±5pp (kept above terminal growth), margin ±2pp
+        # centred on this ticker's base case (audit #22): ROIC ±5pp (the low step kept above terminal growth, and left out
+        # when that leaves it no lower than the base), margin ±2pp
         B0 = base_in["scenarios"]["base"]
         r0, mg0 = B0["steady_roic"], B0["steady_margin"]
-        roics, margins = (max(r0 - 0.05, B0["terminal_growth"] + 0.01), r0, r0 + 0.05), (mg0 - 0.02, mg0, mg0 + 0.02)
+        lo = max(r0 - 0.05, B0["terminal_growth"] + 0.01)
+        roics, margins = ((lo,) if lo < r0 - 1e-9 else ()) + (r0, r0 + 0.05), (mg0 - 0.02, mg0, mg0 + 0.02)
         grid = []
         for r in roics:
             row = []
@@ -355,7 +359,9 @@ def sens_html(sn: dict, out: dict) -> str:
         rate = "<p>Discount rate: the WACC is set manually in this model (the average of Bloomberg's and FactSet's), so the live 10-year yield does not move it; the table steps the WACC instead.</p>" if sn["manual_wacc"] else "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
     else:
         intro = f"<p>Base DCF ({usd(base['dcf']['target'])}) against the two most subjective steady-state assumptions. The highlighted cell is the house base case.</p>{g}"
-        cap = f"<p>Capex intensity in the explicit period sets where the {sn['n_conv']}-year reinvestment glide starts, so for a capital-heavy name it is the swing assumption of the DCF leg: the grid scales FY+1 and FY+2 capex (and leases) and shifts the steady margin.</p>{cg}"
+        lead = (f"Capex intensity in the explicit period sets where the {sn['n_conv']}-year reinvestment glide starts, so for a capital-heavy name it is the swing assumption of the DCF leg"
+                if sn["n_conv"] else f"Capex intensity in the explicit period: this model has no transition years, so it moves the explicit-period FCFF and the steady state starts after FY{sn['last_explicit'] // 10}")
+        cap = f"<p>{lead}: the grid scales FY+1 and FY+2 capex (and leases) and shifts the steady margin.</p>{cg}"
         rate = "<p>Discount rate: the risk-free rate the monitor uses is the live 10-year yield.</p>"
     return (intro + cap + f"<p>The P/E leg is linear in the multiple: every turn of P/E is worth about {usd(sn['eps']['base'])} per share on base-case EPS.</p>{p}" + rate + r)
 
@@ -442,7 +448,8 @@ def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str
     cols = model.period_meta()
     years = [c for c in cols if c["annual"] and c["status"] != "actual"]   # after a Q4 the year is history (audit #191)
     fc = {k: [tables[k]["fcff"].get(c["key"]) for c in years] for k in SCN}
-    # the current-year column is the full fiscal year; the DCF uses the H2 stub (shown in the DCF table)
+    # a year in progress is charted in full while the DCF uses its unreported quarters (the stub row of the DCF table)
+    note = " (first column is the full current year; the DCF uses its second half)" if model.fc_quarters else ""
     labels = [c["label"].replace("E", "") for c in years]
     rev = [tables["base"]["revenue"].get(c["key"]) for c in years]
     mg = [tables["base"]["margin"].get(c["key"]) for c in years]
@@ -460,7 +467,7 @@ def chart_payload(model: mm.Model, out: dict, tables: dict, inputs: dict) -> str
                 "dcf": [s["bear"]["dcf"]["target"], s["base"]["dcf"]["target"], s["bull"]["dcf"]["target"], h["dcf_target"]],
                 "pe": [s["bear"]["multiples"]["target"], s["base"]["multiples"]["target"], s["bull"]["multiples"]["target"], h["multiples_target"]],
                 "blend": [s["bear"]["blended_target"], s["base"]["blended_target"], s["bull"]["blended_target"], h["target"]], "tpl_label": inputs.get("baseline", {}).get("label", "Baseline")},
-        "fc": {"labels": labels, "bear": fc["bear"], "base": fc["base"], "bull": fc["bull"],
+        "fc": {"labels": labels, "bear": fc["bear"], "base": fc["base"], "bull": fc["bull"], "note": note,
                "stage": ["explicit" if c["status"] == "forecast" else "transition" for c in years]},
         "rev": {"labels": hist_labels + labels, "rev": hist_rev + rev, "margin": hist_mg + mg, "capex": hist_capex + capex,
                 "n_hist": len(hist_years)},
@@ -609,7 +616,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
         narrative = "".join([
             article("1. How the DCF works", f"""<p>A company is worth the cash it will generate, discounted because future dollars are worth less than today's. The cash in question is <b>unlevered free cash flow</b>: operating profit after tax, plus depreciation, minus the reinvestment needed to keep growing (capex, leases, working capital).</p>
 <p>FY{y1 // 10} in the base case: NOPAT {bn(nopat27)} + D&A {bn(da27)} − capex {bn(capex27)} + working capital and other {bn(-wc27)} = <b>FCFF {bn(fcff27)}</b>. Consensus is the starting point; the house adjustments are layered on top (see the assumptions section).</p>"""),
-            article("2. Three periods" if model.years_ext else "2. Two periods", f"""<div class='timeline'><div><span>FY{fy} H2 – FY{(y2 if model.years_ext else model.last_explicit) // 10}</span><b>Explicit period</b><small>Consensus plus house uplifts.</small></div>
+            article("2. Three periods" if model.years_ext else "2. Two periods", f"""<div class='timeline'><div><span>{f"FY{fy} H2" if model.fc_quarters else f"FY{y1 // 10}"} – FY{(y2 if model.years_ext else model.last_explicit) // 10}</span><b>Explicit period</b><small>Consensus plus house uplifts.</small></div>
 {timeline_tail}</div>
 <p>Historical ROIC in this model's measure: {', '.join(f'{l} {pc(v, 0)}' for l, v in roic_hist) or 'n/a'}. FCFF turns positive in <b>{first_pos}</b>.</p><div id='c_fc' class='chart tall'></div>"""),
             article("3. Discount rate and the bridge to a target", f"""<p>WACC <b>{pc(w['wacc'], 2)}</b>: risk-free {pc(inputs['wacc']['risk_free'], 2)}, ERP {pc(inputs['wacc']['erp'])}, beta {inputs['wacc']['beta']:.2f}.</p>{wacc_table(w, inputs)}
@@ -635,7 +642,7 @@ def render(inputs: dict, out: dict, live: dict, new_q: list[int], avc: dict, app
 
     def valuation_section(k):
         sc = s[k]
-        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'])}{bridge_table(sc, w, S[k], price, SCN_LABEL[k], inputs['blend'])}"
+        return f"<h4>Discounted cash flows ({SCN_LABEL[k]})</h4>{dcf_table(sc['dcf'], bool(model.fc_quarters))}{bridge_table(sc, w, S[k], price, SCN_LABEL[k], inputs['blend'])}"
 
     toggle = "<div class='toggle' role='tablist'>" + "".join(
         f"<button role='tab' data-scn='{k}' class='{'on' if k == 'base' else ''}'>{SCN_LABEL[k]}</button>" for k in SCN) + "</div>"
@@ -815,7 +822,7 @@ plot('c_fc',[
  {{type:'bar',x:D.fc.labels,y:D.fc.bear.map(v=>v/1000),name:'Bear',marker:{{color:C.s2}},hovertemplate:'%{{x}} bear $%{{y:,.1f}}bn<extra></extra>'}},
  {{type:'bar',x:D.fc.labels,y:D.fc.base.map(v=>v/1000),name:'Base',marker:{{color:C.s1}},hovertemplate:'%{{x}} base $%{{y:,.1f}}bn<extra></extra>'}},
  {{type:'bar',x:D.fc.labels,y:D.fc.bull.map(v=>v/1000),name:'Bull',marker:{{color:C.s3}},hovertemplate:'%{{x}} bull $%{{y:,.1f}}bn<extra></extra>'}}],
- {{...base,title:{{text:'Unlevered free cash flow by fiscal year, $bn (first column is the full current year; the DCF uses its second half)',font:{{size:14,color:C.text}},x:0}},barmode:'group',bargap:0.25,legend:{{orientation:'h',y:-0.22}},
+ {{...base,title:{{text:'Unlevered free cash flow by fiscal year, $bn'+D.fc.note,font:{{size:14,color:C.text}},x:0}},barmode:'group',bargap:0.25,legend:{{orientation:'h',y:-0.22}},
   yaxis:{{gridcolor:C.grid,zerolinecolor:C.t2,tickprefix:'$',ticksuffix:'bn'}},xaxis:{{showgrid:false,tickangle:-45}},
   shapes:[{{type:'rect',xref:'x',yref:'paper',x0:-0.5,x1:D.fc.stage.lastIndexOf('explicit')+0.5,y0:0,y1:1,fillcolor:C.s1,opacity:0.07,line:{{width:0}}}}],
   annotations:[{{x:D.fc.stage.lastIndexOf('explicit')/2,y:1,yref:'paper',text:'explicit (consensus)',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}}].concat(D.fc.stage.includes('transition')?[{{x:D.fc.stage.lastIndexOf('explicit')+1+(D.fc.labels.length-D.fc.stage.lastIndexOf('explicit')-1)/2,y:1,yref:'paper',text:'transition to steady state',showarrow:false,font:{{color:C.t2,size:11}},yanchor:'bottom'}}]:[])}},cfg);

@@ -199,7 +199,7 @@ MODEL_METRICS = {
 MODEL_UNITS = {"revenue_cagr_5y": "pct", "q5_q8_operating_margin": "pct", "steady_margin": "pct",
                "steady_roic": "pct", "q5_q8_eps": "usd"}
 MODEL_BASES = {"q5_q8_operating_margin": lambda inp: "gaap",
-               "q5_q8_eps": lambda inp: "non_gaap" if str((inp.get("blend") or {}).get("earnings_basis", "GAAP")).lower()
+               "q5_q8_eps": lambda inp: "non_gaap" if str((inp.get("blend") or {}).get("earnings_basis", "GAAP")).strip().lower()
                not in ("gaap", "ifrs") else "gaap"}
 
 
